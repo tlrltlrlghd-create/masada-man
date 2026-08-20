@@ -40,13 +40,15 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
 
   final List<int> _rawBuffer = [];
 
-  // 마사다 CAN 순정 데이터
+  // DBC 순정 규격 물리 데이터
   double soc = 0.0;
-  double packVolt = 0.0;
+  double packVolt = 320.0;
   double packCurr = 0.0;
   double speed = 0.0;
-  double motorRpm = 0.0;
   double temp = 20.0;
+  double soh = 100.0;
+  double maxCellVolt = 0.0;
+  double minCellVolt = 0.0;
   double chargeKw = 0.0;
   double smoothedChargeKw = 0.0;
   final Queue<double> _chargePowerBuffer = Queue<double>();
@@ -72,14 +74,12 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     _startTimers();
     await _requestPermissions();
 
-    // 1. 10초 대기 후 최초 연결
     _initialDelayTimer = Timer(const Duration(seconds: 10), () {
       if (mounted && !isConnected && !isConnecting) {
         _connectToEvLogger();
       }
     });
 
-    // 2. 10초 이후 완전 단절 시 5초 주기 재연결 감시
     _reconnectLoopTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
       if (totalSeconds >= 10 && !isConnected && !isConnecting && mounted) {
         _connectToEvLogger();
@@ -123,25 +123,8 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
         if (efficiencyQueue.length > 5) efficiencyQueue.removeFirst();
         smoothedEfficiency = efficiencyQueue.reduce((a, b) => a + b) / efficiencyQueue.length;
         historicalEfficiency = (historicalEfficiency * 0.8) + (instantEfficiency * 0.2);
-
-        // RPM/파워 기반 가상 사운드 피치/볼륨 업데이트 (사운드 켜졌을 때)
-        _updateVirtualSoundEngine(powerKw, motorRpm);
       });
     });
-  }
-
-  void _updateVirtualSoundEngine(double powerKw, double rpm) {
-    if (currentSound == EngineSoundType.mute) return;
-
-    // 모터 RPM 또는 주행 파워를 기반으로 피치(0.8x ~ 2.5x) 가변
-    double targetPitch = 1.0;
-    if (rpm > 0) {
-      targetPitch = (0.8 + (rpm / 6000.0) * 1.5).clamp(0.8, 2.5);
-    } else if (speed > 0) {
-      targetPitch = (0.8 + (speed / 100.0) * 1.5).clamp(0.8, 2.5);
-    } else if (powerKw > 1.0) {
-      targetPitch = (1.0 + (powerKw / 40.0) * 0.8).clamp(1.0, 2.2);
-    }
   }
 
   String _formatDuration(int seconds) {
@@ -322,48 +305,79 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     }
   }
 
+  // DBC 순정 규격 기반 다중 패킷 식별 파서
   void _handleStreamData(Uint8List chunk) {
     _rawBuffer.addAll(chunk);
 
     while (_rawBuffer.length >= 8) {
-      int rawSoc = _rawBuffer[0];
-      double candidateSoc = (rawSoc * 0.4 > 100.0) ? rawSoc * 0.5 : rawSoc * 0.4;
+      // 1. BMS_VCU_1 패킷 검증 (PackVolt: 16|16, PackCurr: 32|16, HTemp: 48|8)
+      int candidateVolt = _rawBuffer[2] | (_rawBuffer[3] << 8);
+      int candidateRawCurr = _rawBuffer[4] | (_rawBuffer[5] << 8);
+      int candidateTemp = _rawBuffer[6];
 
-      int rawVolt = _rawBuffer[1] | (_rawBuffer[2] << 8);
-      double candidateVolt = rawVolt > 1000 ? rawVolt * 0.1 : rawVolt.toDouble();
-
-      if (candidateSoc >= 1.0 && candidateSoc <= 100.0 && candidateVolt >= 200.0 && candidateVolt <= 450.0) {
+      if (candidateVolt >= 200 && candidateVolt <= 450 && candidateRawCurr >= 500 && candidateRawCurr <= 1500) {
         Uint8List p = Uint8List.fromList(_rawBuffer.sublist(0, 8));
         _rawBuffer.removeRange(0, 8);
-        _parseValidBmsPacket(p, candidateSoc, candidateVolt);
-      } else {
-        _rawBuffer.removeAt(0);
+        _parseBmsVcu1(p, candidateVolt, candidateRawCurr, candidateTemp);
+        continue;
       }
+
+      // 2. BMS_VCU_0 패킷 검증 (BMS_SOC: 8|8, CellHVolt: 24|16, CellLVolt: 48|16)
+      int candidateRawSoc = _rawBuffer[1];
+      double candidateSoc = candidateRawSoc * 0.5;
+      int candidateHVolt = _rawBuffer[3] | (_rawBuffer[4] << 8);
+
+      if (candidateSoc >= 1.0 && candidateSoc <= 100.0 && candidateHVolt >= 2000 && candidateHVolt <= 4500) {
+        Uint8List p = Uint8List.fromList(_rawBuffer.sublist(0, 8));
+        _rawBuffer.removeRange(0, 8);
+        _parseBmsVcu0(p, candidateSoc);
+        continue;
+      }
+
+      // 일치하지 않는 바이트 쉬프트
+      _rawBuffer.removeAt(0);
     }
 
     if (_rawBuffer.length > 256) _rawBuffer.clear();
   }
 
-  void _parseValidBmsPacket(Uint8List p, double parsedSoc, double parsedVolt) {
+  // BO_ 2365553923 BMS_VCU_0 파싱 (SOC, 셀전압)
+  void _parseBmsVcu0(Uint8List p, double parsedSoc) {
     if (!mounted) return;
     setState(() {
+      // SG_ BMS_SOC : 8|8@1+ (0.5,0)
       soc = parsedSoc.clamp(0.0, 100.0);
       if (initialSoc == null && soc > 0) initialSoc = soc;
 
-      packVolt = parsedVolt;
+      // SG_ BMS_CellHVolt : 24|16@1+ (0.001,0)
+      int rawHVolt = p[3] | (p[4] << 8);
+      maxCellVolt = rawHVolt * 0.001;
 
-      int rawCurr = p[3] | (p[4] << 8);
-      if (rawCurr > 5000) {
-        packCurr = (rawCurr - 10000) * 0.1;
-      } else {
-        packCurr = (rawCurr - 1000) * 0.1;
-      }
+      // SG_ BMS_CellLVolt : 48|16@1+ (0.001,0)
+      int rawLVolt = p[6] | (p[7] << 8);
+      minCellVolt = rawLVolt * 0.001;
+    });
+  }
+
+  // BO_ 2365554179 BMS_VCU_1 파싱 (전압, 전류, 온도, SOH)
+  void _parseBmsVcu1(Uint8List p, int parsedVolt, int parsedRawCurr, int parsedRawTemp) {
+    if (!mounted) return;
+    setState(() {
+      // SG_ BMS_SOH : 8|8@1+ (1,0)
+      soh = p[1].toDouble();
+
+      // SG_ BMS_PackVolt : 16|16@1+ (1,0) [0|800] "V"
+      packVolt = parsedVolt.toDouble();
+
+      // SG_ BMS_PackCurr : 32|16@1+ (1,-1000) [-1000|1000] "A"
+      packCurr = (parsedRawCurr - 1000).toDouble();
       packCurr = packCurr.clamp(-120.0, 150.0);
 
-      int rawTemp = p[5];
-      temp = (rawTemp >= 40) ? (rawTemp - 40).toDouble() : rawTemp.toDouble();
+      // SG_ BMS_Htemp : 48|8@1+ (1,-40) [-40|200] "°C"
+      temp = (parsedRawTemp - 40).toDouble();
       if (temp < -20 || temp > 80) temp = 22.0;
 
+      // 실시간 파워 (kW)
       double pKw = (packVolt * packCurr) / 1000.0;
       if (pKw < -0.3) {
         chargeKw = pKw.abs().clamp(0.0, 60.0);
@@ -438,7 +452,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
         ),
         Row(
           children: [
-            // 1. 소형 가상 엔진음 선택창
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
               decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(16)),
@@ -460,8 +473,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
               ),
             ),
             const SizedBox(width: 8),
-
-            // 2. 테마 선택 드롭다운
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
               decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(16)),
@@ -483,8 +494,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
               ),
             ),
             const SizedBox(width: 10),
-
-            // 3. 블루투스 연결 상태 뱃지
             InkWell(
               onTap: () {
                 if (isConnected) {
@@ -624,7 +633,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
                 subText: '(${chargePercentPerHour.toStringAsFixed(1)} %/h)',
                 bottomInfo: etaText.isNotEmpty ? etaText : null,
               ),
-              _buildDataCard('주행 속도', speed.round().toString(), 'km/h', const Color(0xFFECEFF1), const Color(0xFF37474F)),
+              _buildDataCard('배터리 전압/전류', '${packVolt.toStringAsFixed(0)}V / ${packCurr.toStringAsFixed(1)}A', '', const Color(0xFFECEFF1), const Color(0xFF37474F)),
             ],
           ),
         ),
@@ -671,7 +680,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
             children: [
               Expanded(child: _buildDataCard('실시간 출력/충전', '${powerKw.toStringAsFixed(1)}', 'kW', dynamicColor, dynamicColor)),
               const SizedBox(width: 14),
-              Expanded(child: _buildDataCard('주행 속도', speed.round().toString(), 'km/h', Colors.white, const Color(0xFF38BDF8))),
+              Expanded(child: _buildDataCard('배터리 전압/전류', '${packVolt.toStringAsFixed(0)}V / ${packCurr.toStringAsFixed(1)}A', '', Colors.white, const Color(0xFF38BDF8))),
             ],
           ),
         )
@@ -832,11 +841,11 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
         children: [
           _buildSubItem('운행 시간', _formatDuration(totalSeconds), const Color(0xFF00E5FF)),
           _buildSubDivider(),
-          _buildSubItem('운행 거리', '${tripDistance.toStringAsFixed(1)} km', const Color(0xFF00E5FF)),
+          _buildSubItem('배터리 건강(SOH)', '${soh.toStringAsFixed(0)} %', const Color(0xFF00E5FF)),
           _buildSubDivider(),
           _buildSubItem('배터리 사용량', '${usedSoc.toStringAsFixed(1)} %', const Color(0xFFFF5252)),
           _buildSubDivider(),
-          _buildSubItem('배터리 온도', '${temp.toStringAsFixed(1)} °C', const Color(0xFF00E5FF)),
+          _buildSubItem('배터리 최고온도', '${temp.toStringAsFixed(1)} °C', const Color(0xFF00E5FF)),
         ],
       ),
     );
