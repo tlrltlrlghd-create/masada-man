@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:audioplayers/audioplayers.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -32,6 +33,10 @@ class MasadaDashboardApp extends StatefulWidget {
 class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   DashboardTheme currentTheme = DashboardTheme.originalNeon;
   EngineSoundType currentSound = EngineSoundType.mute;
+
+  // 오디오 플레이어
+  final AudioPlayer _audioPlayer = AudioPlayer();
+  double _lastAppliedPitch = 1.0;
 
   BluetoothConnection? connection;
   StreamSubscription<Uint8List>? _streamSub;
@@ -65,6 +70,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
 
   Timer? _tripTimer;
   Timer? _uiRefreshTimer;
+  Timer? _soundUpdateTimer;
   Timer? _reconnectLoopTimer;
   Timer? _initialDelayTimer;
 
@@ -75,6 +81,8 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   }
 
   Future<void> _initApp() async {
+    _audioPlayer.setReleaseMode(ReleaseMode.loop);
+
     _startTimers();
     await _requestPermissions();
 
@@ -95,9 +103,11 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   void dispose() {
     _tripTimer?.cancel();
     _uiRefreshTimer?.cancel();
+    _soundUpdateTimer?.cancel();
     _initialDelayTimer?.cancel();
     _reconnectLoopTimer?.cancel();
     _streamSub?.cancel();
+    _audioPlayer.dispose();
     connection?.dispose();
     super.dispose();
   }
@@ -134,6 +144,66 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
         }
       });
     });
+
+    _soundUpdateTimer = Timer.periodic(const Duration(milliseconds: 100), (timer) {
+      _applyRealtimeSoundDynamics();
+    });
+  }
+
+  void _changeEngineSound(EngineSoundType newSound) async {
+    setState(() => currentSound = newSound);
+
+    if (newSound == EngineSoundType.mute) {
+      await _audioPlayer.stop();
+      return;
+    }
+
+    String assetPath = '';
+    switch (newSound) {
+      case EngineSoundType.v8Engine:
+        assetPath = 'sounds/v8.mp3';
+        break;
+      case EngineSoundType.ioniq5n:
+        assetPath = 'sounds/ioniq5n.mp3';
+        break;
+      case EngineSoundType.porscheEsound:
+        assetPath = 'sounds/porsche.mp3';
+        break;
+      case EngineSoundType.mute:
+        break;
+    }
+
+    try {
+      await _audioPlayer.stop();
+      await _audioPlayer.setSource(AssetSource(assetPath));
+      await _audioPlayer.setPlaybackRate(1.0);
+      await _audioPlayer.resume();
+    } catch (_) {}
+  }
+
+  void _applyRealtimeSoundDynamics() async {
+    if (currentSound == EngineSoundType.mute) return;
+
+    double powerKw = (packVolt * packCurr) / 1000.0;
+    double targetPitch = 1.0;
+
+    if (motorRpm > 100) {
+      targetPitch = 0.8 + (motorRpm / 6500.0) * 1.4;
+    } else if (speed > 1.0) {
+      targetPitch = 0.85 + (speed / 110.0) * 1.3;
+    } else if (powerKw > 1.0) {
+      targetPitch = 1.0 + (powerKw / 40.0) * 0.8;
+    } else if (powerKw < -1.0) {
+      targetPitch = 1.2;
+    }
+
+    targetPitch = targetPitch.clamp(0.75, 2.3);
+    double smoothedPitch = (_lastAppliedPitch * 0.7) + (targetPitch * 0.3);
+    _lastAppliedPitch = smoothedPitch;
+
+    try {
+      await _audioPlayer.setPlaybackRate(smoothedPitch);
+    } catch (_) {}
   }
 
   String _formatDuration(int seconds) {
@@ -535,7 +605,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
                   dropdownColor: const Color(0xFF161A22),
                   icon: const Icon(Icons.volume_up_outlined, color: Colors.cyanAccent, size: 20),
                   onChanged: (newSound) {
-                    if (newSound != null) setState(() => currentSound = newSound);
+                    if (newSound != null) _changeEngineSound(newSound);
                   },
                   items: const [
                     DropdownMenuItem(value: EngineSoundType.mute, child: Text('🔇 무음', style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold))),
@@ -793,7 +863,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
               border: Border.all(color: const Color(0xFFE9271D), width: 3),
             ),
             child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
+              mainAxisAlignment: CenterAlignment.center,
               children: [
                 const Text('//M POWER (kW)', style: TextStyle(color: Color(0xFFE9271D), fontSize: 16, fontWeight: FontWeight.w900, fontStyle: FontStyle.italic)),
                 const SizedBox(height: 6),
@@ -813,7 +883,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
               border: Border.all(color: const Color(0xFF0066B1), width: 3),
             ),
             child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
+              mainAxisAlignment: CenterAlignment.center,
               children: [
                 const Text('BATTERY SOC', style: TextStyle(color: Color(0xFF0066B1), fontSize: 16, fontWeight: FontWeight.w900, fontStyle: FontStyle.italic)),
                 const SizedBox(height: 6),
@@ -883,7 +953,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     );
   }
 
-  // 회생제동 / 가속출력 양방향 게이지 (두께 24px 확장 및 가독성 대폭 강화)
   Widget _buildBidirectionalPowerBar(double powerKw) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
@@ -919,7 +988,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
           ),
           const SizedBox(height: 8),
           SizedBox(
-            height: 24, // 게이지 두께를 기존 12 -> 24로 대폭 확장
+            height: 24,
             child: CustomPaint(
               painter: BidirectionalPowerPainter(powerKw: powerKw),
               child: Container(),
@@ -1071,11 +1140,9 @@ class BidirectionalPowerPainter extends CustomPainter {
     final center = size.width / 2;
     final rrect = RRect.fromRectAndRadius(Rect.fromLTWH(0, 0, size.width, size.height), const Radius.circular(8));
 
-    // 배경 트랙
     final bgPaint = Paint()..color = const Color(0xFF161A22);
     canvas.drawRRect(rrect, bgPaint);
 
-    // 중앙 기준선
     final centerLinePaint = Paint()
       ..color = Colors.white54
       ..strokeWidth = 3;
