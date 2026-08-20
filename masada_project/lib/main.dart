@@ -41,7 +41,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   final List<int> _byteBuffer = [];
   String _asciiBuffer = '';
 
-  // DBC 순정 규격 물리 데이터
   double soc = 0.0;
   double packVolt = 320.0;
   double packCurr = 0.0;
@@ -312,9 +311,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     }
   }
 
-  // 완벽한 29비트 CAN ID 식별 엔진 (바이너리 + 아스키 동시 파싱)
   void _handleIncomingData(Uint8List chunk) {
-    // 1. 아스키 텍스트 라인 파싱
     String textChunk = String.fromCharCodes(chunk);
     _asciiBuffer += textChunk;
 
@@ -328,7 +325,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     }
     if (_asciiBuffer.length > 512) _asciiBuffer = '';
 
-    // 2. 바이너리 스트림 슬라이딩 윈도우 파싱
     _byteBuffer.addAll(chunk);
 
     while (_byteBuffer.length >= 12) {
@@ -338,7 +334,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
       bool isMeter = false;
       int headerSize = 4;
 
-      // 4바이트 CAN ID 매칭 (0x8CFF7D03 / 0x0CFF7D03 / 0x2365553923)
       if ((_byteBuffer[0] & 0x1F) == 0x0C && _byteBuffer[1] == 0xFF && _byteBuffer[2] == 0x7D && _byteBuffer[3] == 0x03) {
         is7D = true;
       } else if (_byteBuffer[0] == 0x03 && _byteBuffer[1] == 0x7D && _byteBuffer[2] == 0xFF && (_byteBuffer[3] & 0x1F) == 0x0C) {
@@ -418,59 +413,49 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     return res;
   }
 
-  // BO_ 2365553923 BMS_VCU_0 : SOC & Cell Volts
   void _processBmsVcu0(List<int> d) {
     if (d.length < 8) return;
 
-    // SG_ BMS_SOC : 8|8@1+ (0.5,0)
     double parsedSoc = d[1] * 0.5;
     if (parsedSoc >= 1.0 && parsedSoc <= 100.0) {
       soc = parsedSoc;
       if (initialSoc == null && soc > 0) initialSoc = soc;
     }
 
-    // SG_ BMS_CellHVolt : 24|16@1+ (0.001,0)
     int rawHVolt = d[3] | (d[4] << 8);
     if (rawHVolt >= 2000 && rawHVolt <= 4500) {
       maxCellVolt = rawHVolt * 0.001;
     }
 
-    // SG_ BMS_CellLVolt : 48|16@1+ (0.001,0)
     int rawLVolt = d[6] | (d[7] << 8);
     if (rawLVolt >= 2000 && rawLVolt <= 4500) {
       minCellVolt = rawLVolt * 0.001;
     }
   }
 
-  // BO_ 2365554179 BMS_VCU_1 : Volt, Curr, Temp, SOH
   void _processBmsVcu1(List<int> d) {
     if (d.length < 8) return;
 
-    // SG_ BMS_SOH : 8|8@1+ (1,0)
     if (d[1] >= 40 && d[1] <= 100) {
       soh = d[1].toDouble();
     }
 
-    // SG_ BMS_PackVolt : 16|16@1+ (1,0) [0|800] "V"
     int rawVolt = d[2] | (d[3] << 8);
     if (rawVolt >= 200 && rawVolt <= 450) {
       packVolt = rawVolt.toDouble();
     }
 
-    // SG_ BMS_PackCurr : 32|16@1+ (1,-1000) [-1000|1000] "A"
     int rawCurr = d[4] | (d[5] << 8);
     if (rawCurr >= 500 && rawCurr <= 1500) {
       packCurr = (rawCurr - 1000).toDouble();
       packCurr = packCurr.clamp(-120.0, 150.0);
     }
 
-    // SG_ BMS_Htemp : 48|8@1+ (1,-40) [-40|200] "°C"
     int rawTemp = d[6];
     if (rawTemp >= 20 && rawTemp <= 140) {
       temp = (rawTemp - 40).toDouble();
     }
 
-    // 실시간 파워 (kW)
     double pKw = (packVolt * packCurr) / 1000.0;
     if (pKw < -0.3) {
       chargeKw = pKw.abs().clamp(0.0, 60.0);
@@ -479,14 +464,12 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     }
   }
 
-  // BO_ 2365552898 MCU_VCU_0 : 모터 실제 속도 (RPM)
   void _processMcuVcu0(List<int> d) {
     if (d.length < 8) return;
     int rawSpd = d[4] | (d[5] << 8);
     motorRpm = (rawSpd - 12000).toDouble().clamp(0.0, 12000.0);
   }
 
-  // BO_ 2566839509 Meter_VCU_1 : 계기판 실제 차속 (km/h)
   void _processMeterVcu1(List<int> d) {
     if (d.length < 8) return;
     speed = d[0].toDouble().clamp(0.0, 150.0);
