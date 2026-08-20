@@ -84,12 +84,12 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
         totalSeconds++;
         if (speed > 0) tripDistance += (speed / 3600.0);
 
-        // 충전 파워 스무딩 버퍼 (수치가 튀지 않도록 보정)
+        // 충전 파워 스무딩
         _chargePowerBuffer.addLast(chargeKw);
         if (_chargePowerBuffer.length > 5) _chargePowerBuffer.removeFirst();
         smoothedChargeKw = _chargePowerBuffer.reduce((a, b) => a + b) / _chargePowerBuffer.length;
 
-        // 실시간 5초 주행 전비
+        // 전비 스무딩
         double instantEfficiency = 5.5;
         double powerKw = (packVolt * packCurr) / 1000.0;
         if (powerKw < 0) {
@@ -113,10 +113,12 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
   }
 
-  // 구간별 감속이 완벽 반영된 누적 완충 시간 계산기
-  Map<String, int> _calcChargeEta(double curSoc, double curKw) {
-    if (curKw <= 0.3 || curSoc >= 99.5) return {'to80': 0, 'to100': 0};
-    const double totalKWh = 38.7; // 마사다 총 배터리 용량
+  // 배터리 승온 시간 및 구간 감속이 통합된 지능형 충전 ETA 계산기
+  Map<String, dynamic> _calcChargeEta(double curSoc, double curKw, double curTemp) {
+    if (curKw <= 0.3 || curSoc >= 99.5) {
+      return {'to80': 0, 'to100': 0, 'isPreheating': false, 'heatMins': 0};
+    }
+    const double totalKWh = 38.7;
 
     // 완속 충전 (7kW 이하)
     if (curKw <= 7.0) {
@@ -125,37 +127,57 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
       return {
         'to80': (remKwh80 / curKw * 60).round(),
         'to100': (remKwh100 / curKw * 60).round(),
+        'isPreheating': false,
+        'heatMins': 0,
       };
     }
 
-    // 급속 충전 (> 7kW) : 3개 구간별 합산 계산
+    // 급속 충전 (> 7kW)
+    double heatMinutes = 0.0;
+    bool isPreheating = false;
+
+    // 1. 겨울철 저온 승온(히팅) 시간 산출 (목표온도: 15℃)
+    if (curTemp < 15.0) {
+      isPreheating = true;
+      // 300kg LFP 팩 1도 올리는 데 약 0.083 kWh 소요
+      double energyToHeat = (15.0 - curTemp) * 0.083;
+      // 현재 인입 전력 기준 승온 소요 분 계산 (최소 5kW 이상 히팅 전력 가정)
+      double heatingPower = math.max(5.0, math.min(curKw, 20.0));
+      heatMinutes = (energyToHeat / heatingPower) * 60.0;
+    }
+
     double minutesTo80 = 0.0;
     double minutesTo100 = 0.0;
 
-    // 1구간: 현재 SOC ~ 80% (현재 최대 급속 충전 파워)
+    // 2. 승온 후 본격 충전 파워 기준 구간별 합산
+    double effectiveKw = math.max(curKw, 25.0); // 승온 완료 후 정상 급속 파워 회복 가정
+
+    // 1구간 (~80%)
     if (curSoc < 80.0) {
       double kwh1 = (80.0 - curSoc) / 100.0 * totalKWh;
-      minutesTo80 = (kwh1 / curKw) * 60;
+      minutesTo80 = (kwh1 / effectiveKw) * 60;
       minutesTo100 += minutesTo80;
     }
 
-    // 2구간: 80% ~ 90% (BMS 1차 감속: 15kW 적용)
+    // 2구간 (80%~90% 감속: 15kW)
     if (curSoc < 90.0) {
       double startSoc2 = math.max(80.0, curSoc);
       double kwh2 = (90.0 - startSoc2) / 100.0 * totalKWh;
-      minutesTo100 += (kwh2 / math.min(curKw, 15.0)) * 60;
+      minutesTo100 += (kwh2 / 15.0) * 60;
     }
 
-    // 3구간: 90% ~ 100% (BMS 2차 초감속/셀밸런싱: 6kW 적용)
+    // 3구간 (90%~100% 초감속: 6kW)
     if (curSoc < 100.0) {
       double startSoc3 = math.max(90.0, curSoc);
       double kwh3 = (100.0 - startSoc3) / 100.0 * totalKWh;
-      minutesTo100 += (kwh3 / math.min(curKw, 6.0)) * 60;
+      minutesTo100 += (kwh3 / 6.0) * 60;
     }
 
     return {
-      'to80': minutesTo80.round(),
-      'to100': minutesTo100.round(),
+      'to80': (minutesTo80 + heatMinutes).round(),
+      'to100': (minutesTo100 + heatMinutes).round(),
+      'isPreheating': isPreheating,
+      'heatMins': heatMinutes.round(),
     };
   }
 
@@ -260,7 +282,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     double usedSoc = initialSoc != null ? math.max(0.0, initialSoc! - soc) : 0.0;
     double chargePercentPerHour = smoothedChargeKw > 0 ? (smoothedChargeKw / 0.387) : 0.0;
     double powerKw = (packVolt * packCurr) / 1000.0;
-    var eta = _calcChargeEta(soc, smoothedChargeKw > 0 ? smoothedChargeKw : chargeKw);
+    var eta = _calcChargeEta(soc, smoothedChargeKw > 0 ? smoothedChargeKw : chargeKw, temp);
 
     return Scaffold(
       backgroundColor: _getBgColor(),
@@ -388,7 +410,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     required double bmsRange,
     required double chargePercentPerHour,
     required double powerKw,
-    required Map<String, int> eta,
+    required Map<String, dynamic> eta,
   }) {
     switch (currentTheme) {
       case DashboardTheme.originalNeon:
@@ -402,10 +424,12 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     }
   }
 
-  Widget _buildOriginalNeonBody(Color dynamicColor, double ecoRange, double bmsRange, double chargePercentPerHour, Map<String, int> eta) {
+  Widget _buildOriginalNeonBody(Color dynamicColor, double ecoRange, double bmsRange, double chargePercentPerHour, Map<String, dynamic> eta) {
     String etaText = '';
     if (chargeKw > 0.3) {
-      if (soc < 80.0) {
+      if (eta['isPreheating'] == true && eta['heatMins'] > 0) {
+        etaText = '[예열 +${eta['heatMins']}분] 완충 약 ${eta['to100']}분';
+      } else if (soc < 80.0) {
         etaText = '80% 약 ${eta['to80']}분 | 완충 약 ${eta['to100']}분';
       } else {
         etaText = '완충까지 약 ${eta['to100']}분 (감속구간)';
@@ -479,8 +503,8 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     );
   }
 
-  Widget _buildTeslaBody(Color dynamicColor, double ecoRange, double powerKw, Map<String, int> eta) {
-    String etaText = chargeKw > 0.3 ? (soc < 80 ? '80% 약 ${eta['to80']}분 | 완충 약 ${eta['to100']}분' : '완충 약 ${eta['to100']}분') : '';
+  Widget _buildTeslaBody(Color dynamicColor, double ecoRange, double powerKw, Map<String, dynamic> eta) {
+    String etaText = chargeKw > 0.3 ? (eta['isPreheating'] ? '[예열] 완충 약 ${eta['to100']}분' : (soc < 80 ? '80% 약 ${eta['to80']}분 | 완충 약 ${eta['to100']}분' : '완충 약 ${eta['to100']}분')) : '';
     return Column(
       children: [
         Container(
@@ -526,7 +550,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     );
   }
 
-  Widget _buildBmwBody(Color dynamicColor, double ecoRange, double powerKw, Map<String, int> eta) {
+  Widget _buildBmwBody(Color dynamicColor, double ecoRange, double powerKw, Map<String, dynamic> eta) {
     return Row(
       children: [
         Expanded(
@@ -572,8 +596,8 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     );
   }
 
-  Widget _buildBydBody(Color dynamicColor, double ecoRange, double bmsRange, double chargePercentPerHour, Map<String, int> eta) {
-    String etaText = chargeKw > 0.3 ? (soc < 80 ? '80% 약 ${eta['to80']}분 | 완충 약 ${eta['to100']}분' : '완충 약 ${eta['to100']}분') : '';
+  Widget _buildBydBody(Color dynamicColor, double ecoRange, double bmsRange, double chargePercentPerHour, Map<String, dynamic> eta) {
+    String etaText = chargeKw > 0.3 ? (eta['isPreheating'] ? '[예열] 완충 약 ${eta['to100']}분' : (soc < 80 ? '80% 약 ${eta['to80']}분 | 완충 약 ${eta['to100']}분' : '완충 약 ${eta['to100']}분')) : '';
     return Row(
       children: [
         Expanded(
