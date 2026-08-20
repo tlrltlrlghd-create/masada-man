@@ -34,7 +34,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   bool isConnecting = false;
   bool isConnected = false;
 
-  // 바이트 정렬 버퍼
+  // 바이트 수신 버퍼
   final List<int> _rawBuffer = [];
 
   // CAN 순정 데이터 변수
@@ -64,11 +64,16 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   }
 
   Future<void> _initApp() async {
-    await _requestPermissions();
     _startTimers();
+    // 1. 권한 먼저 확실하게 획득
+    await _requestPermissions();
+    // 2. 블루투스 활성화 대기 후 연결
+    await Future.delayed(const Duration(milliseconds: 500));
     _connectToEvLogger();
-    _autoReconnectTimer = Timer.periodic(const Duration(seconds: 8), (timer) {
-      if (!isConnected && !isConnecting) {
+
+    // 3. 주기적 재연결 타이머 (연결 끊어졌을 때만)
+    _autoReconnectTimer = Timer.periodic(const Duration(seconds: 4), (timer) {
+      if (!isConnected && !isConnecting && mounted) {
         _connectToEvLogger();
       }
     });
@@ -192,31 +197,55 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
 
   void _connectToEvLogger() async {
     if (isConnected || isConnecting) return;
+    if (!mounted) return;
     setState(() => isConnecting = true);
 
     try {
+      // 1. 등록(페어링)된 블루투스 기기 목록 조회
       List<BluetoothDevice> devices = await FlutterBluetoothSerial.instance.getBondedDevices();
       BluetoothDevice? targetDevice;
+
       for (var d in devices) {
-        if (d.name?.contains('EvLogger') == true || d.address.contains('F0:D6')) {
+        String name = (d.name ?? '').toUpperCase();
+        String addr = d.address.toUpperCase();
+        if (name.contains('EVLOGGER') || addr.contains('F0:D6') || addr.contains('F0D6')) {
           targetDevice = d;
           break;
         }
       }
 
+      // 등록 기기 목록에 있으면 바로 연결
       if (targetDevice != null) {
         _startConnection(targetDevice);
       } else {
-        setState(() => isConnecting = false);
+        // 등록 기기에 없을 경우 실시간 스캔
+        StreamSubscription? discoverySub;
+        discoverySub = FlutterBluetoothSerial.instance.startDiscovery().listen((r) {
+          String name = (r.device.name ?? '').toUpperCase();
+          String addr = r.device.address.toUpperCase();
+          if (name.contains('EVLOGGER') || addr.contains('F0:D6') || addr.contains('F0D6')) {
+            discoverySub?.cancel();
+            _startConnection(r.device);
+          }
+        });
+
+        // 3초 후에도 못 찾으면 탐색 취소 및 락 해제
+        Future.delayed(const Duration(seconds: 3), () {
+          discoverySub?.cancel();
+          if (!isConnected && mounted) {
+            setState(() => isConnecting = false);
+          }
+        });
       }
     } catch (e) {
-      setState(() => isConnecting = false);
+      if (mounted) setState(() => isConnecting = false);
     }
   }
 
   void _startConnection(BluetoothDevice device) async {
     try {
       BluetoothConnection conn = await BluetoothConnection.toAddress(device.address);
+      if (!mounted) return;
       setState(() {
         connection = conn;
         isConnected = true;
@@ -224,12 +253,14 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
       });
 
       conn.input?.listen(_handleStreamData).onDone(() {
+        if (!mounted) return;
         setState(() {
           isConnected = false;
           connection = null;
         });
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         isConnected = false;
         isConnecting = false;
@@ -238,6 +269,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     }
   }
 
+  // 스트림 조각 모음 및 동기화 파서 (DBC 기반)
   void _handleStreamData(Uint8List chunk) {
     _rawBuffer.addAll(chunk);
 
@@ -248,30 +280,37 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
       int vRaw = _rawBuffer[2] | (_rawBuffer[3] << 8);
       double candidateVolt = vRaw.toDouble();
 
-      if (candidateSoc >= 0.0 && candidateSoc <= 100.0 && candidateVolt >= 200.0 && candidateVolt <= 500.0) {
+      // 마사다 배터리 유효 범위 체크 (SOC: 0~100%, 전압: 200~450V)
+      if (candidateSoc >= 0.0 && candidateSoc <= 100.0 && candidateVolt >= 200.0 && candidateVolt <= 450.0) {
         Uint8List packet = Uint8List.fromList(_rawBuffer.sublist(0, 8));
         _rawBuffer.removeRange(0, 8);
         _parseValidPacket(packet);
       } else {
-        _rawBuffer.removeAt(0);
+        _rawBuffer.removeAt(0); // 1바이트 밀어서 재탐색
       }
     }
 
-    if (_rawBuffer.length > 64) _rawBuffer.clear();
+    if (_rawBuffer.length > 128) _rawBuffer.clear();
   }
 
   void _parseValidPacket(Uint8List p) {
+    if (!mounted) return;
     setState(() {
+      // 1. 배터리 잔량 SOC (%)
       soc = (p[1] * 0.5).clamp(0.0, 100.0);
       if (initialSoc == null && soc > 0) initialSoc = soc;
 
+      // 2. 팩 전압 (V)
       packVolt = (p[2] | (p[3] << 8)).toDouble();
 
+      // 3. 팩 전류 (A) - Offset 1000, 0.1A 단위 보정
       int rawCurr = p[4] | (p[5] << 8);
       packCurr = (rawCurr - 1000).toDouble();
 
+      // 4. 배터리 온도 (℃)
       temp = (p[6] - 40).toDouble();
 
+      // 5. 충전 전력 계산
       double pKw = (packVolt * packCurr) / 1000.0;
       if (pKw < 0) {
         chargeKw = pKw.abs().clamp(0.0, 60.0);
@@ -368,7 +407,13 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
             ),
             const SizedBox(width: 12),
             InkWell(
-              onTap: isConnected ? () => connection?.finish() : _connectToEvLogger,
+              onTap: () {
+                if (isConnected) {
+                  connection?.finish();
+                } else {
+                  _connectToEvLogger();
+                }
+              },
               borderRadius: BorderRadius.circular(20),
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
@@ -395,7 +440,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
                     ),
                     const SizedBox(width: 8),
                     Text(
-                      isConnected ? 'EvLogger 연결됨' : (isConnecting ? '자동 연결 중...' : '블루투스 연결'),
+                      isConnected ? 'EvLogger 연결됨' : (isConnecting ? '연결 시도 중...' : '블루투스 연결'),
                       style: TextStyle(
                         color: isConnected ? const Color(0xFF00E676) : const Color(0xFFFF5252),
                         fontSize: 14,
@@ -432,7 +477,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     }
   }
 
-  // 1. 대화면 오리지널 네온 바디 (점보 사이즈)
   Widget _buildOriginalNeonBody(Color dynamicColor, double ecoRange, double bmsRange, double chargePercentPerHour, Map<String, dynamic> eta) {
     String etaText = '';
     if (chargeKw > 0.3) {
@@ -447,7 +491,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
 
     return Row(
       children: [
-        // 좌측 대형 카드
         Expanded(
           flex: 10,
           child: Column(
@@ -458,8 +501,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
             ],
           ),
         ),
-
-        // 중앙 점보 원형 게이지
         Expanded(
           flex: 14,
           child: Center(
@@ -490,8 +531,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
             ),
           ),
         ),
-
-        // 우측 대형 카드
         Expanded(
           flex: 10,
           child: Column(
@@ -514,7 +553,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     );
   }
 
-  // 2. 테슬라 스타일
   Widget _buildTeslaBody(Color dynamicColor, double ecoRange, double powerKw, Map<String, dynamic> eta) {
     String etaText = chargeKw > 0.3 ? (eta['isPreheating'] ? '[예열] 완충 약 ${eta['to100']}분' : (soc < 80 ? '80% 약 ${eta['to80']}분 | 완충 약 ${eta['to100']}분' : '완충 약 ${eta['to100']}분')) : '';
     return Column(
@@ -562,7 +600,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     );
   }
 
-  // 3. BMW M 스타일
   Widget _buildBmwBody(Color dynamicColor, double ecoRange, double powerKw, Map<String, dynamic> eta) {
     return Row(
       children: [
@@ -609,7 +646,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     );
   }
 
-  // 4. BYD 오션 스타일
   Widget _buildBydBody(Color dynamicColor, double ecoRange, double bmsRange, double chargePercentPerHour, Map<String, dynamic> eta) {
     String etaText = chargeKw > 0.3 ? (eta['isPreheating'] ? '[예열] 완충 약 ${eta['to100']}분' : (soc < 80 ? '80% 약 ${eta['to80']}분 | 완충 약 ${eta['to100']}분' : '완충 약 ${eta['to100']}분')) : '';
     return Row(
@@ -666,7 +702,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     );
   }
 
-  // 양방향 파워바 확대
   Widget _buildBidirectionalPowerBar(double powerKw) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
@@ -706,7 +741,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     );
   }
 
-  // 하단 트립 바 대형 폰트
   Widget _buildFooter(double usedSoc) {
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 20),
@@ -729,7 +763,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     );
   }
 
-  // 대형 데이터 카드
   Widget _buildDataCard(
     String label,
     String value,
@@ -807,7 +840,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   }
 }
 
-// 점보 원형 게이지 페인터 (두께 22px)
 class HtmlExactGaugePainter extends CustomPainter {
   final double soc;
   final Color targetColor;
