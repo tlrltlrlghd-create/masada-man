@@ -6,7 +6,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:audioplayers/audioplayers.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -21,7 +20,6 @@ void main() {
 }
 
 enum DashboardTheme { originalNeon, teslaMinimal, bmwDynamic, bydOcean }
-enum EngineSoundType { mute, v8Engine, ioniq5n, porscheEsound }
 
 class MasadaDashboardApp extends StatefulWidget {
   const MasadaDashboardApp({super.key});
@@ -32,12 +30,6 @@ class MasadaDashboardApp extends StatefulWidget {
 
 class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   DashboardTheme currentTheme = DashboardTheme.originalNeon;
-  EngineSoundType currentSound = EngineSoundType.mute;
-
-  // 오디오 플레이어 (충돌 없는 초경량 엔진)
-  final AudioPlayer _audioPlayer = AudioPlayer();
-  final AudioCache _audioCache = AudioCache(prefix: 'assets/sounds/');
-  double _lastAppliedPitch = 1.0;
 
   BluetoothConnection? connection;
   StreamSubscription<Uint8List>? _streamSub;
@@ -71,7 +63,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
 
   Timer? _tripTimer;
   Timer? _uiRefreshTimer;
-  Timer? _soundUpdateTimer;
   Timer? _reconnectLoopTimer;
   Timer? _initialDelayTimer;
 
@@ -82,8 +73,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   }
 
   Future<void> _initApp() async {
-    _audioCache.fixedPlayer = _audioPlayer;
-
     _startTimers();
     await _requestPermissions();
 
@@ -104,11 +93,9 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   void dispose() {
     _tripTimer?.cancel();
     _uiRefreshTimer?.cancel();
-    _soundUpdateTimer?.cancel();
     _initialDelayTimer?.cancel();
     _reconnectLoopTimer?.cancel();
     _streamSub?.cancel();
-    _audioPlayer.dispose();
     connection?.dispose();
     super.dispose();
   }
@@ -145,66 +132,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
         }
       });
     });
-
-    // 0.1초 단위 RPM / 가속출력 기반 사운드 피치 실시간 제어
-    _soundUpdateTimer = Timer.periodic(const Duration(milliseconds: 100), (timer) {
-      _applyRealtimeSoundDynamics();
-    });
-  }
-
-  void _changeEngineSound(EngineSoundType newSound) async {
-    setState(() => currentSound = newSound);
-
-    if (newSound == EngineSoundType.mute) {
-      await _audioPlayer.stop();
-      return;
-    }
-
-    String fileName = '';
-    switch (newSound) {
-      case EngineSoundType.v8Engine:
-        fileName = 'v8.mp3';
-        break;
-      case EngineSoundType.ioniq5n:
-        fileName = 'ioniq5n.mp3';
-        break;
-      case EngineSoundType.porscheEsound:
-        fileName = 'porsche.mp3';
-        break;
-      case EngineSoundType.mute:
-        break;
-    }
-
-    try {
-      await _audioPlayer.stop();
-      await _audioCache.loop(fileName);
-      await _audioPlayer.setPlaybackRate(1.0);
-    } catch (_) {}
-  }
-
-  void _applyRealtimeSoundDynamics() async {
-    if (currentSound == EngineSoundType.mute) return;
-
-    double powerKw = (packVolt * packCurr) / 1000.0;
-    double targetPitch = 1.0;
-
-    if (motorRpm > 100) {
-      targetPitch = 0.8 + (motorRpm / 6500.0) * 1.4;
-    } else if (speed > 1.0) {
-      targetPitch = 0.85 + (speed / 110.0) * 1.3;
-    } else if (powerKw > 1.0) {
-      targetPitch = 1.0 + (powerKw / 40.0) * 0.8;
-    } else if (powerKw < -1.0) {
-      targetPitch = 1.2;
-    }
-
-    targetPitch = targetPitch.clamp(0.75, 2.3);
-    double smoothedPitch = (_lastAppliedPitch * 0.7) + (targetPitch * 0.3);
-    _lastAppliedPitch = smoothedPitch;
-
-    try {
-      await _audioPlayer.setPlaybackRate(smoothedPitch);
-    } catch (_) {}
   }
 
   String _formatDuration(int seconds) {
@@ -597,27 +524,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
         ),
         Row(
           children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-              decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(16)),
-              child: DropdownButtonHideUnderline(
-                child: DropdownButton<EngineSoundType>(
-                  value: currentSound,
-                  dropdownColor: const Color(0xFF161A22),
-                  icon: const Icon(Icons.volume_up_outlined, color: Colors.cyanAccent, size: 20),
-                  onChanged: (newSound) {
-                    if (newSound != null) _changeEngineSound(newSound);
-                  },
-                  items: const [
-                    DropdownMenuItem(value: EngineSoundType.mute, child: Text('🔇 무음', style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold))),
-                    DropdownMenuItem(value: EngineSoundType.v8Engine, child: Text('🏎️ V8 트윈터보', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold))),
-                    DropdownMenuItem(value: EngineSoundType.ioniq5n, child: Text('⚡ 아이오닉 5 N', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold))),
-                    DropdownMenuItem(value: EngineSoundType.porscheEsound, child: Text('🛸 포르쉐 E-Sound', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold))),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(width: 8),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
               decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(16)),
