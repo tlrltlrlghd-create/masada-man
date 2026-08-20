@@ -34,7 +34,10 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   bool isConnecting = false;
   bool isConnected = false;
 
-  // CAN 순정 데이터 변수
+  // 바이트 정렬 버퍼
+  final List<int> _rawBuffer = [];
+
+  // CAN 순정 데이터
   double soc = 0.0;
   double packVolt = 0.0;
   double packCurr = 0.0;
@@ -64,8 +67,11 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     await _requestPermissions();
     _startTimers();
     _connectToEvLogger();
-    _autoReconnectTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
-      if (!isConnected && !isConnecting) _connectToEvLogger();
+    // 8초 주기로 완전히 끊겼을 때만 단일 재연결 시도
+    _autoReconnectTimer = Timer.periodic(const Duration(seconds: 8), (timer) {
+      if (!isConnected && !isConnecting) {
+        _connectToEvLogger();
+      }
     });
   }
 
@@ -84,12 +90,10 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
         totalSeconds++;
         if (speed > 0) tripDistance += (speed / 3600.0);
 
-        // 충전 파워 스무딩
         _chargePowerBuffer.addLast(chargeKw);
         if (_chargePowerBuffer.length > 5) _chargePowerBuffer.removeFirst();
         smoothedChargeKw = _chargePowerBuffer.reduce((a, b) => a + b) / _chargePowerBuffer.length;
 
-        // 전비 스무딩
         double instantEfficiency = 5.5;
         double powerKw = (packVolt * packCurr) / 1000.0;
         if (powerKw < 0) {
@@ -113,14 +117,12 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
   }
 
-  // 배터리 승온 시간 및 구간 감속이 통합된 지능형 충전 ETA 계산기
   Map<String, dynamic> _calcChargeEta(double curSoc, double curKw, double curTemp) {
     if (curKw <= 0.3 || curSoc >= 99.5) {
       return {'to80': 0, 'to100': 0, 'isPreheating': false, 'heatMins': 0};
     }
     const double totalKWh = 38.7;
 
-    // 완속 충전 (7kW 이하)
     if (curKw <= 7.0) {
       double remKwh80 = math.max(0.0, (80.0 - curSoc) / 100.0 * totalKWh);
       double remKwh100 = math.max(0.0, (100.0 - curSoc) / 100.0 * totalKWh);
@@ -132,41 +134,32 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
       };
     }
 
-    // 급속 충전 (> 7kW)
     double heatMinutes = 0.0;
     bool isPreheating = false;
 
-    // 1. 겨울철 저온 승온(히팅) 시간 산출 (목표온도: 15℃)
     if (curTemp < 15.0) {
       isPreheating = true;
-      // 300kg LFP 팩 1도 올리는 데 약 0.083 kWh 소요
       double energyToHeat = (15.0 - curTemp) * 0.083;
-      // 현재 인입 전력 기준 승온 소요 분 계산 (최소 5kW 이상 히팅 전력 가정)
       double heatingPower = math.max(5.0, math.min(curKw, 20.0));
       heatMinutes = (energyToHeat / heatingPower) * 60.0;
     }
 
     double minutesTo80 = 0.0;
     double minutesTo100 = 0.0;
+    double effectiveKw = math.max(curKw, 25.0);
 
-    // 2. 승온 후 본격 충전 파워 기준 구간별 합산
-    double effectiveKw = math.max(curKw, 25.0); // 승온 완료 후 정상 급속 파워 회복 가정
-
-    // 1구간 (~80%)
     if (curSoc < 80.0) {
       double kwh1 = (80.0 - curSoc) / 100.0 * totalKWh;
       minutesTo80 = (kwh1 / effectiveKw) * 60;
       minutesTo100 += minutesTo80;
     }
 
-    // 2구간 (80%~90% 감속: 15kW)
     if (curSoc < 90.0) {
       double startSoc2 = math.max(80.0, curSoc);
       double kwh2 = (90.0 - startSoc2) / 100.0 * totalKWh;
       minutesTo100 += (kwh2 / 15.0) * 60;
     }
 
-    // 3구간 (90%~100% 초감속: 6kW)
     if (curSoc < 100.0) {
       double startSoc3 = math.max(90.0, curSoc);
       double kwh3 = (100.0 - startSoc3) / 100.0 * totalKWh;
@@ -215,18 +208,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
       if (targetDevice != null) {
         _startConnection(targetDevice);
       } else {
-        StreamSubscription? discoverySub;
-        discoverySub = FlutterBluetoothSerial.instance.startDiscovery().listen((r) {
-          if (r.device.name?.contains('EvLogger') == true) {
-            discoverySub?.cancel();
-            _startConnection(r.device);
-          }
-        });
-        Future.delayed(const Duration(seconds: 4), () {
-          if (!isConnected && isConnecting) {
-            setState(() => isConnecting = false);
-          }
-        });
+        setState(() => isConnecting = false);
       }
     } catch (e) {
       setState(() => isConnecting = false);
@@ -241,7 +223,8 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
         isConnected = true;
         isConnecting = false;
       });
-      conn.input?.listen(_onDataReceived).onDone(() {
+
+      conn.input?.listen(_handleStreamData).onDone(() {
         setState(() {
           isConnected = false;
           connection = null;
@@ -256,21 +239,58 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     }
   }
 
-  void _onDataReceived(Uint8List rawBytes) {
-    if (rawBytes.length >= 8) {
-      ByteData view = ByteData.sublistView(rawBytes);
-      setState(() {
-        soc = (rawBytes[1] * 0.5).clamp(0.0, 100.0);
-        if (initialSoc == null && soc > 0) initialSoc = soc;
+  // 스트림 조각 모음 및 동기화 파서
+  void _handleStreamData(Uint8List chunk) {
+    _rawBuffer.addAll(chunk);
 
-        packVolt = view.getUint16(2, Endian.little).toDouble();
-        packCurr = (view.getUint16(4, Endian.little) - 1000).toDouble();
-        temp = (rawBytes[6] - 40).toDouble();
+    // 8바이트 이상 쌓였을 때 유효 패킷 탐색
+    while (_rawBuffer.length >= 8) {
+      // SOC 유효 범위 (0~200 raw = 0~100%) 검증
+      int candidateSocRaw = _rawBuffer[1];
+      double candidateSoc = candidateSocRaw * 0.5;
 
-        double powerKw = (packVolt * packCurr) / 1000.0;
-        chargeKw = powerKw < 0 ? powerKw.abs() : 0.0;
-      });
+      // 팩 전압 유효 범위 (마사다 LFP 250V ~ 420V)
+      int vRaw = _rawBuffer[2] | (_rawBuffer[3] << 8);
+      double candidateVolt = vRaw.toDouble();
+
+      if (candidateSoc >= 0.0 && candidateSoc <= 100.0 && candidateVolt >= 200.0 && candidateVolt <= 500.0) {
+        // 유효 패킷 발견: 8바이트 추출 파싱
+        Uint8List packet = Uint8List.fromList(_rawBuffer.sublist(0, 8));
+        _rawBuffer.removeRange(0, 8);
+        _parseValidPacket(packet);
+      } else {
+        // 동기화가 밀렸으면 1바이트 버리고 다음 바이트 탐색
+        _rawBuffer.removeAt(0);
+      }
     }
+
+    if (_rawBuffer.length > 64) _rawBuffer.clear();
+  }
+
+  void _parseValidPacket(Uint8List p) {
+    setState(() {
+      // 1. 배터리 잔량 SOC (%)
+      soc = (p[1] * 0.5).clamp(0.0, 100.0);
+      if (initialSoc == null && soc > 0) initialSoc = soc;
+
+      // 2. 팩 전압 (V)
+      packVolt = (p[2] | (p[3] << 8)).toDouble();
+
+      // 3. 팩 전류 (A) - Offset 1000, 0.1A 단위 보정
+      int rawCurr = p[4] | (p[5] << 8);
+      packCurr = (rawCurr - 1000).toDouble();
+
+      // 4. 배터리 온도 (℃)
+      temp = (p[6] - 40).toDouble();
+
+      // 5. 충전 전력 계산
+      double pKw = (packVolt * packCurr) / 1000.0;
+      if (pKw < 0) {
+        chargeKw = pKw.abs().clamp(0.0, 60.0);
+      } else {
+        chargeKw = 0.0;
+      }
+    });
   }
 
   @override
@@ -562,7 +582,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
               border: Border.all(color: const Color(0xFFE9271D), width: 2),
             ),
             child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
+              mainAxisAlignment: CenterAxisAlignment.center,
               children: [
                 const Text('//M POWER (kW)', style: TextStyle(color: Color(0xFFE9271D), fontSize: 13, fontWeight: FontWeight.w900, fontStyle: FontStyle.italic)),
                 const SizedBox(height: 4),
