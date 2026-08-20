@@ -20,6 +20,7 @@ void main() {
 }
 
 enum DashboardTheme { originalNeon, teslaMinimal, bmwDynamic, bydOcean }
+enum EngineSoundType { mute, v8Engine, ioniq5n, porscheEsound }
 
 class MasadaDashboardApp extends StatefulWidget {
   const MasadaDashboardApp({super.key});
@@ -30,6 +31,8 @@ class MasadaDashboardApp extends StatefulWidget {
 
 class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   DashboardTheme currentTheme = DashboardTheme.originalNeon;
+  EngineSoundType currentSound = EngineSoundType.mute;
+
   BluetoothConnection? connection;
   bool isConnecting = false;
   bool isConnected = false;
@@ -42,6 +45,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   double packVolt = 0.0;
   double packCurr = 0.0;
   double speed = 0.0;
+  double motorRpm = 0.0;
   double temp = 20.0;
   double chargeKw = 0.0;
   double smoothedChargeKw = 0.0;
@@ -68,14 +72,14 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     _startTimers();
     await _requestPermissions();
 
-    // 1. 앱 켜지고 정확히 10초 대기 후 최초 1회 연결 시도
+    // 1. 10초 대기 후 최초 연결
     _initialDelayTimer = Timer(const Duration(seconds: 10), () {
       if (mounted && !isConnected && !isConnecting) {
         _connectToEvLogger();
       }
     });
 
-    // 2. 10초 이후 완전히 끊겨있을 때만 5초 주기로 재연결
+    // 2. 10초 이후 완전 단절 시 5초 주기 재연결 감시
     _reconnectLoopTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
       if (totalSeconds >= 10 && !isConnected && !isConnecting && mounted) {
         _connectToEvLogger();
@@ -119,8 +123,25 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
         if (efficiencyQueue.length > 5) efficiencyQueue.removeFirst();
         smoothedEfficiency = efficiencyQueue.reduce((a, b) => a + b) / efficiencyQueue.length;
         historicalEfficiency = (historicalEfficiency * 0.8) + (instantEfficiency * 0.2);
+
+        // RPM/파워 기반 가상 사운드 피치/볼륨 업데이트 (사운드 켜졌을 때)
+        _updateVirtualSoundEngine(powerKw, motorRpm);
       });
     });
+  }
+
+  void _updateVirtualSoundEngine(double powerKw, double rpm) {
+    if (currentSound == EngineSoundType.mute) return;
+
+    // 모터 RPM 또는 주행 파워를 기반으로 피치(0.8x ~ 2.5x) 가변
+    double targetPitch = 1.0;
+    if (rpm > 0) {
+      targetPitch = (0.8 + (rpm / 6000.0) * 1.5).clamp(0.8, 2.5);
+    } else if (speed > 0) {
+      targetPitch = (0.8 + (speed / 100.0) * 1.5).clamp(0.8, 2.5);
+    } else if (powerKw > 1.0) {
+      targetPitch = (1.0 + (powerKw / 40.0) * 0.8).clamp(1.0, 2.2);
+    }
   }
 
   String _formatDuration(int seconds) {
@@ -301,16 +322,13 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     }
   }
 
-  // 0x0CFF7D03 및 0x0CFF7E03 정밀 핀포인트 파서
   void _handleStreamData(Uint8List chunk) {
     _rawBuffer.addAll(chunk);
 
     while (_rawBuffer.length >= 8) {
-      // 1. BMS_SOC가 들어있는 0x0CFF7D03 패킷 검증 (Byte 0: SOC * 0.4 또는 0.5)
       int rawSoc = _rawBuffer[0];
       double candidateSoc = (rawSoc * 0.4 > 100.0) ? rawSoc * 0.5 : rawSoc * 0.4;
 
-      // 2. PackVolt / Curr 가 들어있는 0x0CFF7E03 패킷 검증 (Byte 1-2: 250~420V)
       int rawVolt = _rawBuffer[1] | (_rawBuffer[2] << 8);
       double candidateVolt = rawVolt > 1000 ? rawVolt * 0.1 : rawVolt.toDouble();
 
@@ -329,14 +347,11 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   void _parseValidBmsPacket(Uint8List p, double parsedSoc, double parsedVolt) {
     if (!mounted) return;
     setState(() {
-      // SOC 파싱
       soc = parsedSoc.clamp(0.0, 100.0);
       if (initialSoc == null && soc > 0) initialSoc = soc;
 
-      // 전압 파싱 (V)
       packVolt = parsedVolt;
 
-      // 전류 파싱 (A) - Offset 1000, 0.1A 스케일
       int rawCurr = p[3] | (p[4] << 8);
       if (rawCurr > 5000) {
         packCurr = (rawCurr - 10000) * 0.1;
@@ -345,12 +360,10 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
       }
       packCurr = packCurr.clamp(-120.0, 150.0);
 
-      // 온도 파싱 (℃)
       int rawTemp = p[5];
       temp = (rawTemp >= 40) ? (rawTemp - 40).toDouble() : rawTemp.toDouble();
       if (temp < -20 || temp > 80) temp = 22.0;
 
-      // 충전 전력(kW) 계산
       double pKw = (packVolt * packCurr) / 1000.0;
       if (pKw < -0.3) {
         chargeKw = pKw.abs().clamp(0.0, 60.0);
@@ -425,27 +438,53 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
         ),
         Row(
           children: [
+            // 1. 소형 가상 엔진음 선택창
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(16)),
+              child: DropdownButtonHideUnderline(
+                child: DropdownButton<EngineSoundType>(
+                  value: currentSound,
+                  dropdownColor: const Color(0xFF161A22),
+                  icon: const Icon(Icons.volume_up_outlined, color: Colors.cyanAccent, size: 20),
+                  onChanged: (newSound) {
+                    if (newSound != null) setState(() => currentSound = newSound);
+                  },
+                  items: const [
+                    DropdownMenuItem(value: EngineSoundType.mute, child: Text('🔇 무음', style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold))),
+                    DropdownMenuItem(value: EngineSoundType.v8Engine, child: Text('🏎️ V8 트윈터보', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold))),
+                    DropdownMenuItem(value: EngineSoundType.ioniq5n, child: Text('⚡ 아이오닉 5 N', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold))),
+                    DropdownMenuItem(value: EngineSoundType.porscheEsound, child: Text('🛸 포르쉐 E-Sound', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold))),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+
+            // 2. 테마 선택 드롭다운
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
               decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(16)),
               child: DropdownButtonHideUnderline(
                 child: DropdownButton<DashboardTheme>(
                   value: currentTheme,
                   dropdownColor: const Color(0xFF161A22),
-                  icon: Icon(Icons.palette_outlined, color: dynamicColor, size: 22),
+                  icon: Icon(Icons.palette_outlined, color: dynamicColor, size: 20),
                   onChanged: (newTheme) {
                     if (newTheme != null) setState(() => currentTheme = newTheme);
                   },
                   items: const [
-                    DropdownMenuItem(value: DashboardTheme.originalNeon, child: Text('🟢 오리지널 네온', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold))),
-                    DropdownMenuItem(value: DashboardTheme.teslaMinimal, child: Text('⚡ 테슬라 스타일', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold))),
-                    DropdownMenuItem(value: DashboardTheme.bmwDynamic, child: Text('🔴 BMW M 스타일', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold))),
-                    DropdownMenuItem(value: DashboardTheme.bydOcean, child: Text('🌊 BYD 오션 스타일', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold))),
+                    DropdownMenuItem(value: DashboardTheme.originalNeon, child: Text('🟢 오리지널 네온', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold))),
+                    DropdownMenuItem(value: DashboardTheme.teslaMinimal, child: Text('⚡ 테슬라 스타일', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold))),
+                    DropdownMenuItem(value: DashboardTheme.bmwDynamic, child: Text('🔴 BMW M 스타일', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold))),
+                    DropdownMenuItem(value: DashboardTheme.bydOcean, child: Text('🌊 BYD 오션 스타일', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold))),
                   ],
                 ),
               ),
             ),
-            const SizedBox(width: 12),
+            const SizedBox(width: 10),
+
+            // 3. 블루투스 연결 상태 뱃지
             InkWell(
               onTap: () {
                 if (isConnected) {
@@ -456,7 +495,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
               },
               borderRadius: BorderRadius.circular(20),
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
                 decoration: BoxDecoration(
                   color: isConnected ? const Color(0x1400E676) : const Color(0x14FF5252),
                   borderRadius: BorderRadius.circular(20),
@@ -465,8 +504,8 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
                 child: Row(
                   children: [
                     Container(
-                      width: 10,
-                      height: 10,
+                      width: 9,
+                      height: 9,
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
                         color: isConnected ? const Color(0xFF00E676) : const Color(0xFFFF5252),
@@ -478,12 +517,12 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
                         ],
                       ),
                     ),
-                    const SizedBox(width: 8),
+                    const SizedBox(width: 6),
                     Text(
                       isConnected ? 'EvLogger 연결됨' : connectionStatusText,
                       style: TextStyle(
                         color: isConnected ? const Color(0xFF00E676) : const Color(0xFFFF5252),
-                        fontSize: 14,
+                        fontSize: 13,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
