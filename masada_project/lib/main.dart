@@ -33,6 +33,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   BluetoothConnection? connection;
   bool isConnecting = false;
   bool isConnected = false;
+  String connectionStatusText = '10초 후 자동 연결...';
 
   final List<int> _rawBuffer = [];
 
@@ -54,6 +55,8 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   double smoothedEfficiency = 5.5;
 
   Timer? _tripTimer;
+  Timer? _reconnectLoopTimer;
+  Timer? _initialDelayTimer;
 
   @override
   void initState() {
@@ -64,13 +67,27 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   Future<void> _initApp() async {
     _startTimers();
     await _requestPermissions();
-    await Future.delayed(const Duration(milliseconds: 600));
-    _connectToEvLogger();
+
+    // 1. 앱 시작 후 10초 대기 후 최초 1회 연결 시도
+    _initialDelayTimer = Timer(const Duration(seconds: 10), () {
+      if (mounted && !isConnected && !isConnecting) {
+        _connectToEvLogger();
+      }
+    });
+
+    // 2. 10초 이후부터 작동하는 '완전히 끊겼을 때만' 감시하는 5초 주기 재연결 루프
+    _reconnectLoopTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
+      if (totalSeconds >= 10 && !isConnected && !isConnecting && mounted) {
+        _connectToEvLogger();
+      }
+    });
   }
 
   @override
   void dispose() {
     _tripTimer?.cancel();
+    _initialDelayTimer?.cancel();
+    _reconnectLoopTimer?.cancel();
     connection?.dispose();
     super.dispose();
   }
@@ -81,6 +98,10 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
       setState(() {
         totalSeconds++;
         if (speed > 0) tripDistance += (speed / 3600.0);
+
+        if (!isConnected && !isConnecting && totalSeconds < 10) {
+          connectionStatusText = '${10 - totalSeconds}초 후 자동 연결';
+        }
 
         _chargePowerBuffer.addLast(chargeKw);
         if (_chargePowerBuffer.length > 5) _chargePowerBuffer.removeFirst();
@@ -175,18 +196,25 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   }
 
   Future<void> _requestPermissions() async {
-    await [
-      Permission.bluetooth,
-      Permission.bluetoothScan,
-      Permission.bluetoothConnect,
-      Permission.location,
-    ].request();
+    try {
+      await [
+        Permission.bluetooth,
+        Permission.bluetoothScan,
+        Permission.bluetoothConnect,
+        Permission.location,
+      ].request();
+    } catch (_) {}
   }
 
   void _connectToEvLogger() async {
+    // 연결 중이거나 이미 연결되어 있으면 중복 실행 원천 차단
     if (isConnected || isConnecting) return;
     if (!mounted) return;
-    setState(() => isConnecting = true);
+
+    setState(() {
+      isConnecting = true;
+      connectionStatusText = '기기 탐색 중...';
+    });
 
     try {
       List<BluetoothDevice> devices = await FlutterBluetoothSerial.instance.getBondedDevices();
@@ -195,76 +223,102 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
       for (var d in devices) {
         String name = (d.name ?? '').toUpperCase();
         String addr = d.address.toUpperCase();
-        if (name.contains('EVLOGGER') || addr.contains('F0:D6') || addr.contains('F0D6')) {
+        if (name.contains('EVLOGGER') || name.contains('LOGGER') || name.contains('OBD') ||
+            addr.contains('F0:D6') || addr.contains('F0D6')) {
           targetDevice = d;
           break;
         }
       }
 
+      if (targetDevice == null && devices.length == 1) {
+        targetDevice = devices.first;
+      }
+
       if (targetDevice != null) {
+        if (mounted) setState(() => connectionStatusText = '연결 시도 중...');
         _startConnection(targetDevice);
       } else {
-        if (mounted) setState(() => isConnecting = false);
+        if (mounted) {
+          setState(() {
+            isConnecting = false;
+            connectionStatusText = '블루투스 연결';
+          });
+        }
       }
     } catch (e) {
-      if (mounted) setState(() => isConnecting = false);
+      if (mounted) {
+        setState(() {
+          isConnecting = false;
+          connectionStatusText = '블루투스 연결';
+        });
+      }
     }
   }
 
   void _startConnection(BluetoothDevice device) async {
     try {
-      BluetoothConnection conn = await BluetoothConnection.toAddress(device.address);
+      BluetoothConnection conn = await BluetoothConnection.toAddress(device.address).timeout(
+        const Duration(seconds: 4),
+        onTimeout: () => throw TimeoutException('Connection timeout'),
+      );
+
       if (!mounted) return;
       setState(() {
         connection = conn;
         isConnected = true;
         isConnecting = false;
+        connectionStatusText = 'EvLogger 연결됨';
       });
 
-      conn.input?.listen(_handleStreamData).onDone(() {
-        if (!mounted) return;
-        setState(() {
-          isConnected = false;
-          connection = null;
-        });
-        // 끊어지면 3초 후 안전하게 1회 재연결
-        Future.delayed(const Duration(seconds: 3), () {
-          if (!isConnected && !isConnecting && mounted) _connectToEvLogger();
-        });
-      });
+      conn.input?.listen(
+        _handleStreamData,
+        onDone: () {
+          if (!mounted) return;
+          setState(() {
+            isConnected = false;
+            isConnecting = false;
+            connection = null;
+            connectionStatusText = '연결 끊김';
+          });
+        },
+        onError: (e) {
+          if (!mounted) return;
+          setState(() {
+            isConnected = false;
+            isConnecting = false;
+            connection = null;
+            connectionStatusText = '연결 오류';
+          });
+        },
+      );
     } catch (e) {
       if (!mounted) return;
       setState(() {
         isConnected = false;
         isConnecting = false;
         connection = null;
+        connectionStatusText = '블루투스 연결';
       });
     }
   }
 
-  // CAN 패킷 헤더 동기화 및 DBC 기반 ID별 분기 파서
+  // CAN 패킷 동기화 파서
   void _handleStreamData(Uint8List chunk) {
     _rawBuffer.addAll(chunk);
 
-    // EvLogger 표준 패킷 길이(12바이트 또는 8바이트) 정렬
     while (_rawBuffer.length >= 8) {
-      // 마사다 CAN 패킷 유효성 체크:
-      // Byte 0: SOC (0.5% 단위, 0~200)
-      // Byte 1-2: Pack Voltage (Little Endian, 2500~4500 = 250.0V~450.0V 또는 250~450V)
-      // Byte 3-4: Pack Current (Offset 1000 or 10000)
-      
       int rawSoc = _rawBuffer[0];
       double candidateSoc = rawSoc * 0.5;
 
       int rawVolt = _rawBuffer[1] | (_rawBuffer[2] << 8);
       double candidateVolt = rawVolt > 1000 ? rawVolt * 0.1 : rawVolt.toDouble();
 
+      // 유효 패킷만 정확하게 파싱
       if (candidateSoc >= 1.0 && candidateSoc <= 100.0 && candidateVolt >= 200.0 && candidateVolt <= 450.0) {
         Uint8List p = Uint8List.fromList(_rawBuffer.sublist(0, 8));
         _rawBuffer.removeRange(0, 8);
         _parseValidBmsPacket(p, candidateSoc, candidateVolt);
       } else {
-        // 동기화가 어긋났으면 1바이트씩 쉬프트
         _rawBuffer.removeAt(0);
       }
     }
@@ -275,30 +329,23 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   void _parseValidBmsPacket(Uint8List p, double parsedSoc, double parsedVolt) {
     if (!mounted) return;
     setState(() {
-      // 1. 배터리 SOC
       soc = parsedSoc.clamp(0.0, 100.0);
       if (initialSoc == null && soc > 0) initialSoc = soc;
 
-      // 2. 팩 전압 (V)
       packVolt = parsedVolt;
 
-      // 3. 팩 전류 (A) - Big/Little 및 Offset 정밀 보정
       int rawCurr = p[3] | (p[4] << 8);
       if (rawCurr > 5000) {
         packCurr = (rawCurr - 10000) * 0.1;
       } else {
         packCurr = (rawCurr - 1000) * 0.1;
       }
-
-      // 비정상 전류 노이즈 방어 (최대 방전 150A, 최대 충전 120A)
       packCurr = packCurr.clamp(-120.0, 150.0);
 
-      // 4. 배터리 온도 (℃)
       int rawTemp = p[5];
       temp = (rawTemp >= 40) ? (rawTemp - 40).toDouble() : rawTemp.toDouble();
-      if (temp < -20 || temp > 80) temp = 22.0; // 노이즈 기본값 보정
+      if (temp < -20 || temp > 80) temp = 22.0;
 
-      // 5. 파워(kW) 및 충전량 계산
       double pKw = (packVolt * packCurr) / 1000.0;
       if (pKw < -0.3) {
         chargeKw = pKw.abs().clamp(0.0, 60.0);
@@ -428,7 +475,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
                     ),
                     const SizedBox(width: 8),
                     Text(
-                      isConnected ? 'EvLogger 연결됨' : (isConnecting ? '연결 시도 중...' : '블루투스 연결'),
+                      isConnected ? 'EvLogger 연결됨' : connectionStatusText,
                       style: TextStyle(
                         color: isConnected ? const Color(0xFF00E676) : const Color(0xFFFF5252),
                         fontSize: 14,
