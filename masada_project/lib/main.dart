@@ -34,7 +34,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   DashboardTheme currentTheme = DashboardTheme.originalNeon;
   EngineSoundType currentSound = EngineSoundType.mute;
 
-  // 오디오 플레이어
   final AudioPlayer _audioPlayer = AudioPlayer();
   double _lastAppliedPitch = 1.0;
 
@@ -47,7 +46,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   final List<int> _byteBuffer = [];
   String _asciiBuffer = '';
 
-  // 실시간 DBC 물리 데이터
   double soc = 0.0;
   double packVolt = 320.0;
   double packCurr = 0.0;
@@ -863,7 +861,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
               border: Border.all(color: const Color(0xFFE9271D), width: 3),
             ),
             child: Column(
-              mainAxisAlignment: CenterAlignment.center,
+              mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 const Text('//M POWER (kW)', style: TextStyle(color: Color(0xFFE9271D), fontSize: 16, fontWeight: FontWeight.w900, fontStyle: FontStyle.italic)),
                 const SizedBox(height: 6),
@@ -883,7 +881,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
               border: Border.all(color: const Color(0xFF0066B1), width: 3),
             ),
             child: Column(
-              mainAxisAlignment: CenterAlignment.center,
+              mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 const Text('BATTERY SOC', style: TextStyle(color: Color(0xFF0066B1), fontSize: 16, fontWeight: FontWeight.w900, fontStyle: FontStyle.italic)),
                 const SizedBox(height: 6),
