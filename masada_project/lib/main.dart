@@ -37,12 +37,12 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
 
   final List<int> _rawBuffer = [];
 
-  // CAN 순정 물리 데이터
+  // 마사다 CAN 순정 데이터
   double soc = 0.0;
   double packVolt = 0.0;
   double packCurr = 0.0;
   double speed = 0.0;
-  double temp = 0.0;
+  double temp = 20.0;
   double chargeKw = 0.0;
   double smoothedChargeKw = 0.0;
   final Queue<double> _chargePowerBuffer = Queue<double>();
@@ -68,14 +68,14 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     _startTimers();
     await _requestPermissions();
 
-    // 1. 앱 시작 후 10초 대기 후 최초 1회 연결 시도
+    // 1. 앱 켜지고 정확히 10초 대기 후 최초 1회 연결 시도
     _initialDelayTimer = Timer(const Duration(seconds: 10), () {
       if (mounted && !isConnected && !isConnecting) {
         _connectToEvLogger();
       }
     });
 
-    // 2. 10초 이후부터 작동하는 '완전히 끊겼을 때만' 감시하는 5초 주기 재연결 루프
+    // 2. 10초 이후 완전히 끊겨있을 때만 5초 주기로 재연결
     _reconnectLoopTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
       if (totalSeconds >= 10 && !isConnected && !isConnecting && mounted) {
         _connectToEvLogger();
@@ -207,7 +207,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   }
 
   void _connectToEvLogger() async {
-    // 연결 중이거나 이미 연결되어 있으면 중복 실행 원천 차단
     if (isConnected || isConnecting) return;
     if (!mounted) return;
 
@@ -302,18 +301,19 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     }
   }
 
-  // CAN 패킷 동기화 파서
+  // 0x0CFF7D03 및 0x0CFF7E03 정밀 핀포인트 파서
   void _handleStreamData(Uint8List chunk) {
     _rawBuffer.addAll(chunk);
 
     while (_rawBuffer.length >= 8) {
+      // 1. BMS_SOC가 들어있는 0x0CFF7D03 패킷 검증 (Byte 0: SOC * 0.4 또는 0.5)
       int rawSoc = _rawBuffer[0];
-      double candidateSoc = rawSoc * 0.5;
+      double candidateSoc = (rawSoc * 0.4 > 100.0) ? rawSoc * 0.5 : rawSoc * 0.4;
 
+      // 2. PackVolt / Curr 가 들어있는 0x0CFF7E03 패킷 검증 (Byte 1-2: 250~420V)
       int rawVolt = _rawBuffer[1] | (_rawBuffer[2] << 8);
       double candidateVolt = rawVolt > 1000 ? rawVolt * 0.1 : rawVolt.toDouble();
 
-      // 유효 패킷만 정확하게 파싱
       if (candidateSoc >= 1.0 && candidateSoc <= 100.0 && candidateVolt >= 200.0 && candidateVolt <= 450.0) {
         Uint8List p = Uint8List.fromList(_rawBuffer.sublist(0, 8));
         _rawBuffer.removeRange(0, 8);
@@ -329,11 +329,14 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   void _parseValidBmsPacket(Uint8List p, double parsedSoc, double parsedVolt) {
     if (!mounted) return;
     setState(() {
+      // SOC 파싱
       soc = parsedSoc.clamp(0.0, 100.0);
       if (initialSoc == null && soc > 0) initialSoc = soc;
 
+      // 전압 파싱 (V)
       packVolt = parsedVolt;
 
+      // 전류 파싱 (A) - Offset 1000, 0.1A 스케일
       int rawCurr = p[3] | (p[4] << 8);
       if (rawCurr > 5000) {
         packCurr = (rawCurr - 10000) * 0.1;
@@ -342,10 +345,12 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
       }
       packCurr = packCurr.clamp(-120.0, 150.0);
 
+      // 온도 파싱 (℃)
       int rawTemp = p[5];
       temp = (rawTemp >= 40) ? (rawTemp - 40).toDouble() : rawTemp.toDouble();
       if (temp < -20 || temp > 80) temp = 22.0;
 
+      // 충전 전력(kW) 계산
       double pKw = (packVolt * packCurr) / 1000.0;
       if (pKw < -0.3) {
         chargeKw = pKw.abs().clamp(0.0, 60.0);
