@@ -1,13 +1,24 @@
-﻿name: masada_dashboard
-description: "Masada EV Dashboard"
+name: masada_app
+description: "Masada Van EV Dashboard App"
 publish_to: 'none'
 version: 1.0.0+1
+
 environment:
   sdk: '>=3.0.0 <4.0.0'
+
 dependencies:
   flutter:
     sdk: flutter
   flutter_bluetooth_serial: ^0.4.0
-  permission_handler: ^11.3.0
+  permission_handler: ^11.3.1
+  audioplayers: ^6.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^2.0.0
+
 flutter:
   uses-material-design: true
+  assets:
+    - assets/sounds/
