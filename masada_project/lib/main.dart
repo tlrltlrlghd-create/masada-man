@@ -6,7 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:audioplayers/audioplayers.dart';
+import 'package:just_audio/just_audio.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -79,7 +79,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   }
 
   Future<void> _initApp() async {
-    _audioPlayer.setReleaseMode(ReleaseMode.loop);
+    await _audioPlayer.setLoopMode(LoopMode.one);
 
     _startTimers();
     await _requestPermissions();
@@ -159,13 +159,13 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     String assetPath = '';
     switch (newSound) {
       case EngineSoundType.v8Engine:
-        assetPath = 'sounds/v8.mp3';
+        assetPath = 'assets/sounds/v8.mp3';
         break;
       case EngineSoundType.ioniq5n:
-        assetPath = 'sounds/ioniq5n.mp3';
+        assetPath = 'assets/sounds/ioniq5n.mp3';
         break;
       case EngineSoundType.porscheEsound:
-        assetPath = 'sounds/porsche.mp3';
+        assetPath = 'assets/sounds/porsche.mp3';
         break;
       case EngineSoundType.mute:
         break;
@@ -173,9 +173,9 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
 
     try {
       await _audioPlayer.stop();
-      await _audioPlayer.setSource(AssetSource(assetPath));
-      await _audioPlayer.setPlaybackRate(1.0);
-      await _audioPlayer.resume();
+      await _audioPlayer.setAsset(assetPath);
+      await _audioPlayer.setSpeed(1.0);
+      await _audioPlayer.play();
     } catch (_) {}
   }
 
@@ -200,7 +200,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     _lastAppliedPitch = smoothedPitch;
 
     try {
-      await _audioPlayer.setPlaybackRate(smoothedPitch);
+      await _audioPlayer.setSpeed(smoothedPitch);
     } catch (_) {}
   }
 
