@@ -30,26 +30,24 @@ class MasadaDashboardApp extends StatefulWidget {
 
 class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   DashboardTheme currentTheme = DashboardTheme.originalNeon;
-
   BluetoothConnection? connection;
   bool isConnecting = false;
   bool isConnected = false;
 
-  // CAN 순정 데이터
+  // CAN 순정 데이터 변수
   double soc = 0.0;
   double packVolt = 0.0;
   double packCurr = 0.0;
   double speed = 0.0;
   double temp = 0.0;
   double chargeKw = 0.0;
-  double? initialSoc;
+  double smoothedChargeKw = 0.0;
+  final Queue<double> _chargePowerBuffer = Queue<double>();
 
-  // 운행 누적 및 전비
+  double? initialSoc;
   int totalSeconds = 0;
   double tripDistance = 0.0;
   double historicalEfficiency = 5.3;
-
-  // 5초 평균 전비 큐
   final Queue<double> efficiencyQueue = Queue<double>();
   double smoothedEfficiency = 5.5;
 
@@ -67,9 +65,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     _startTimers();
     _connectToEvLogger();
     _autoReconnectTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
-      if (!isConnected && !isConnecting) {
-        _connectToEvLogger();
-      }
+      if (!isConnected && !isConnecting) _connectToEvLogger();
     });
   }
 
@@ -86,10 +82,14 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
       if (!mounted) return;
       setState(() {
         totalSeconds++;
-        if (speed > 0) {
-          tripDistance += (speed / 3600.0);
-        }
+        if (speed > 0) tripDistance += (speed / 3600.0);
 
+        // 충전 파워 스무딩 버퍼 (수치가 튀지 않도록 보정)
+        _chargePowerBuffer.addLast(chargeKw);
+        if (_chargePowerBuffer.length > 5) _chargePowerBuffer.removeFirst();
+        smoothedChargeKw = _chargePowerBuffer.reduce((a, b) => a + b) / _chargePowerBuffer.length;
+
+        // 실시간 5초 주행 전비
         double instantEfficiency = 5.5;
         double powerKw = (packVolt * packCurr) / 1000.0;
         if (powerKw < 0) {
@@ -101,7 +101,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
         efficiencyQueue.addLast(instantEfficiency);
         if (efficiencyQueue.length > 5) efficiencyQueue.removeFirst();
         smoothedEfficiency = efficiencyQueue.reduce((a, b) => a + b) / efficiencyQueue.length;
-
         historicalEfficiency = (historicalEfficiency * 0.8) + (instantEfficiency * 0.2);
       });
     });
@@ -114,51 +113,50 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
   }
 
-  // 급속/완속 구간별 충전 완료 예상 시간 계산 (분 단위)
-  Map<String, int> _calcChargeEta(double currentSoc, double currentKw) {
-    if (currentKw <= 0.3 || currentSoc >= 99.5) return {'to80': 0, 'to100': 0};
+  // 구간별 감속이 완벽 반영된 누적 완충 시간 계산기
+  Map<String, int> _calcChargeEta(double curSoc, double curKw) {
+    if (curKw <= 0.3 || curSoc >= 99.5) return {'to80': 0, 'to100': 0};
+    const double totalKWh = 38.7; // 마사다 총 배터리 용량
 
-    const double totalCapacity = 38.7; // 마사다 밴 배터리 용량 (kWh)
-    
-    // 완속 충전 (7kW 이하): 균등 속도로 계산
-    if (currentKw <= 7.0) {
-      double remKwh80 = math.max(0.0, (80.0 - currentSoc) / 100.0 * totalCapacity);
-      double remKwh100 = math.max(0.0, (100.0 - currentSoc) / 100.0 * totalCapacity);
+    // 완속 충전 (7kW 이하)
+    if (curKw <= 7.0) {
+      double remKwh80 = math.max(0.0, (80.0 - curSoc) / 100.0 * totalKWh);
+      double remKwh100 = math.max(0.0, (100.0 - curSoc) / 100.0 * totalKWh);
       return {
-        'to80': (remKwh80 / currentKw * 60).round(),
-        'to100': (remKwh100 / currentKw * 60).round(),
+        'to80': (remKwh80 / curKw * 60).round(),
+        'to100': (remKwh100 / curKw * 60).round(),
       };
     }
 
-    // 급속 충전 (> 7kW): 구간별 감속 곡선 반영
-    double minTo80 = 0.0;
-    double minTo100 = 0.0;
+    // 급속 충전 (> 7kW) : 3개 구간별 합산 계산
+    double minutesTo80 = 0.0;
+    double minutesTo100 = 0.0;
 
-    // 1단계: ~80% 구간 (현재 급속 파워 기준)
-    if (currentSoc < 80.0) {
-      double kwhTo80 = (80.0 - currentSoc) / 100.0 * totalCapacity;
-      minTo80 = (kwhTo80 / currentKw) * 60;
+    // 1구간: 현재 SOC ~ 80% (현재 최대 급속 충전 파워)
+    if (curSoc < 80.0) {
+      double kwh1 = (80.0 - curSoc) / 100.0 * totalKWh;
+      minutesTo80 = (kwh1 / curKw) * 60;
+      minutesTo100 += minutesTo80;
     }
 
-    // 2단계: 80% ~ 90% 구간 (약 15kW로 감속)
-    double kwh80to90 = (10.0 / 100.0) * totalCapacity;
-    double min80to90 = (kwh80to90 / math.min(currentKw, 15.0)) * 60;
-
-    // 3단계: 90% ~ 100% 구간 (약 6kW 트리클 충전)
-    double kwh90to100 = (10.0 / 100.0) * totalCapacity;
-    double min90to100 = (kwh90to100 / math.min(currentKw, 6.0)) * 60;
-
-    if (currentSoc < 80.0) {
-      minTo100 = minTo80 + min80to90 + min90to100;
-    } else if (currentSoc < 90.0) {
-      double remKwh = (90.0 - currentSoc) / 100.0 * totalCapacity;
-      minTo100 = (remKwh / math.min(currentKw, 15.0) * 60) + min90to100;
-    } else {
-      double remKwh = (100.0 - currentSoc) / 100.0 * totalCapacity;
-      minTo100 = (remKwh / math.min(currentKw, 6.0) * 60);
+    // 2구간: 80% ~ 90% (BMS 1차 감속: 15kW 적용)
+    if (curSoc < 90.0) {
+      double startSoc2 = math.max(80.0, curSoc);
+      double kwh2 = (90.0 - startSoc2) / 100.0 * totalKWh;
+      minutesTo100 += (kwh2 / math.min(curKw, 15.0)) * 60;
     }
 
-    return {'to80': minTo80.round(), 'to100': minTo100.round()};
+    // 3구간: 90% ~ 100% (BMS 2차 초감속/셀밸런싱: 6kW 적용)
+    if (curSoc < 100.0) {
+      double startSoc3 = math.max(90.0, curSoc);
+      double kwh3 = (100.0 - startSoc3) / 100.0 * totalKWh;
+      minutesTo100 += (kwh3 / math.min(curKw, 6.0)) * 60;
+    }
+
+    return {
+      'to80': minutesTo80.round(),
+      'to100': minutesTo100.round(),
+    };
   }
 
   Color _getEfficiencyColor(double eff) {
@@ -260,9 +258,9 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     double remainingKWh = 38.7 * (soc / 100.0);
     double bmsRange = remainingKWh * historicalEfficiency;
     double usedSoc = initialSoc != null ? math.max(0.0, initialSoc! - soc) : 0.0;
-    double chargePercentPerHour = chargeKw > 0 ? (chargeKw / 0.387) : 0.0;
+    double chargePercentPerHour = smoothedChargeKw > 0 ? (smoothedChargeKw / 0.387) : 0.0;
     double powerKw = (packVolt * packCurr) / 1000.0;
-    var eta = _calcChargeEta(soc, chargeKw);
+    var eta = _calcChargeEta(soc, smoothedChargeKw > 0 ? smoothedChargeKw : chargeKw);
 
     return Scaffold(
       backgroundColor: _getBgColor(),
@@ -284,7 +282,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
                 ),
               ),
               const SizedBox(height: 6),
-              // 실시간 회생제동 / 가속 방전 양방향 파워바
               _buildBidirectionalPowerBar(powerKw),
               const SizedBox(height: 6),
               _buildFooter(usedSoc),
@@ -405,14 +402,13 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     }
   }
 
-  // 1. 오리지널 네온 바디 (충전 ETA 반영)
   Widget _buildOriginalNeonBody(Color dynamicColor, double ecoRange, double bmsRange, double chargePercentPerHour, Map<String, int> eta) {
     String etaText = '';
     if (chargeKw > 0.3) {
       if (soc < 80.0) {
-        etaText = '80%까지 약 ${eta['to80']}분 (완충 ${eta['to100']}분)';
+        etaText = '80% 약 ${eta['to80']}분 | 완충 약 ${eta['to100']}분';
       } else {
-        etaText = '완충까지 약 ${eta['to100']}분';
+        etaText = '완충까지 약 ${eta['to100']}분 (감속구간)';
       }
     }
 
@@ -483,9 +479,8 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     );
   }
 
-  // 2. 테슬라 스타일
   Widget _buildTeslaBody(Color dynamicColor, double ecoRange, double powerKw, Map<String, int> eta) {
-    String etaText = chargeKw > 0.3 ? (soc < 80 ? '80%까지 약 ${eta['to80']}분' : '완충까지 약 ${eta['to100']}분') : '';
+    String etaText = chargeKw > 0.3 ? (soc < 80 ? '80% 약 ${eta['to80']}분 | 완충 약 ${eta['to100']}분' : '완충 약 ${eta['to100']}분') : '';
     return Column(
       children: [
         Container(
@@ -531,7 +526,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     );
   }
 
-  // 3. BMW M 스타일
   Widget _buildBmwBody(Color dynamicColor, double ecoRange, double powerKw, Map<String, int> eta) {
     return Row(
       children: [
@@ -578,9 +572,8 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     );
   }
 
-  // 4. BYD 오션 스타일
   Widget _buildBydBody(Color dynamicColor, double ecoRange, double bmsRange, double chargePercentPerHour, Map<String, int> eta) {
-    String etaText = chargeKw > 0.3 ? (soc < 80 ? '80% 약 ${eta['to80']}분' : '완충 약 ${eta['to100']}분') : '';
+    String etaText = chargeKw > 0.3 ? (soc < 80 ? '80% 약 ${eta['to80']}분 | 완충 약 ${eta['to100']}분' : '완충 약 ${eta['to100']}분') : '';
     return Row(
       children: [
         Expanded(
@@ -635,7 +628,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     );
   }
 
-  // 실시간 회생제동 / 방전 양방향 파워바 (중앙 0kW 기준)
   Widget _buildBidirectionalPowerBar(double powerKw) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
@@ -775,7 +767,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   }
 }
 
-// 상단 시작 원형 게이지
 class HtmlExactGaugePainter extends CustomPainter {
   final double soc;
   final Color targetColor;
@@ -809,7 +800,6 @@ class HtmlExactGaugePainter extends CustomPainter {
       oldDelegate.soc != soc || oldDelegate.targetColor != targetColor;
 }
 
-// 실시간 양방향 파워바 그래픽 렌더러
 class BidirectionalPowerPainter extends CustomPainter {
   final double powerKw;
   BidirectionalPowerPainter({required this.powerKw});
@@ -819,18 +809,15 @@ class BidirectionalPowerPainter extends CustomPainter {
     final center = size.width / 2;
     final rrect = RRect.fromRectAndRadius(Rect.fromLTWH(0, 0, size.width, size.height), const Radius.circular(5));
 
-    // 배경 트랙
     final bgPaint = Paint()..color = const Color(0xFF161A22);
     canvas.drawRRect(rrect, bgPaint);
 
-    // 중앙 기준선 (0kW)
     final centerLinePaint = Paint()
       ..color = Colors.white38
       ..strokeWidth = 2;
     canvas.drawLine(Offset(center, 0), Offset(center, size.height), centerLinePaint);
 
     if (powerKw < 0) {
-      // 1. 회생제동 상태 (왼쪽으로 바 확장, 최대 25kW 기준)
       double regenRatio = (powerKw.abs() / 25.0).clamp(0.0, 1.0);
       double barWidth = center * regenRatio;
       final regenPaint = Paint()
@@ -842,10 +829,8 @@ class BidirectionalPowerPainter extends CustomPainter {
         regenPaint,
       );
     } else if (powerKw > 0) {
-      // 2. 가속/방전 상태 (오른쪽으로 바 확장, 최대 60kW 기준)
       double powerRatio = (powerKw / 60.0).clamp(0.0, 1.0);
       double barWidth = (size.width - center) * powerRatio;
-      
       Color barColor = powerKw > 35 ? const Color(0xFFFF3366) : const Color(0xFFFFB800);
       final powerPaint = Paint()..color = barColor;
       canvas.drawRRect(
