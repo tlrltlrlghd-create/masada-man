@@ -38,10 +38,10 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
-  // 모드 전환 변수
+  // 모드 변수
   bool _isCampingMode = false;
 
-  // 배터리 팩 기준 용량 (마사다 밴 = 38.7 kWh)
+  // 마사다 밴 배터리 팩 기준 용량 (38.7 kWh)
   static const double _batteryTotalKwh = 38.7;
 
   // 블루투스 통신 관련
@@ -54,9 +54,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
   // 실시간 전기차 데이터
   double _soc = 87.0;            // 배터리 잔량 (%)
   double _voltage = 318.0;       // 배터리 전압 (V)
-  double _current = 1.0;         // 배터리 전류 (A)
+  double _current = 1.0;         // 배터리 전류 (A: 음수=충전/회생, 양수=방전)
   double _powerKw = 0.3;         // 실시간 파워 (kW)
-  double _chargePowerKw = 0.0;   // 실시간 충전량 (kW)
+  double _chargePowerKw = 0.0;   // 실시간 충전/회생 전력 (kW)
   double _batteryTemp = 30.0;    // 배터리 온도 (°C)
   int _soh = 94;                 // 배터리 건강 상태 (%)
   double _bmsDistance = 185.2;   // BMS 주행 가능 거리 (km)
@@ -104,22 +104,73 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return "${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}";
   }
 
-  // 캠핑 잔여 시간 계산 포맷 함수 (소모 전력 기반)
-  String _calculateRemainingTime(double targetSoc) {
-    double consumeKw = _powerKw.abs();
-    
-    // 소모량이 50W 미만이거나 충전 중일 때
-    if (consumeKw < 0.05) {
-      return "소모 없음 (대기 중)";
+  // ==========================================
+  // ⚡ 급속/완속 충전 곡선(테이퍼링) 보정 계산 알고리즘
+  // ==========================================
+  String _calculateChargeTimeToFull() {
+    if (_chargePowerKw < 0.2) return "--";
+
+    double currentSoc = _soc;
+    if (currentSoc >= 100.0) return "충전 완료";
+
+    double totalHours = 0.0;
+    bool isFastCharge = _chargePowerKw > 10.0; // 10kW 초과 시 급속 충전으로 판단
+
+    if (!isFastCharge) {
+      // 완속 충전 (3kW~7kW): 전 구간 균일 충전
+      double remainKwh = _batteryTotalKwh * (100.0 - currentSoc) / 100.0;
+      totalHours = remainKwh / _chargePowerKw;
+    } else {
+      // 급속 충전: BMS 테이퍼링 커브 적용
+      // 1구간: 현재 ~ 80% (현재 입력 전력 100% 유지)
+      if (currentSoc < 80.0) {
+        double kwh80 = _batteryTotalKwh * (80.0 - currentSoc) / 100.0;
+        totalHours += kwh80 / _chargePowerKw;
+        currentSoc = 80.0;
+      }
+      // 2구간: 80% ~ 90% (전력의 60%로 감발)
+      if (currentSoc < 90.0) {
+        double kwh90 = _batteryTotalKwh * (90.0 - currentSoc) / 100.0;
+        double power80to90 = _chargePowerKw * 0.60;
+        totalHours += kwh90 / (power80to90 < 7.0 ? 7.0 : power80to90);
+        currentSoc = 90.0;
+      }
+      // 3구간: 90% ~ 100% (완속 수준 25%로 급감, 셀 밸런싱)
+      if (currentSoc < 100.0) {
+        double kwh100 = _batteryTotalKwh * (100.0 - currentSoc) / 100.0;
+        double power90to100 = _chargePowerKw * 0.25;
+        totalHours += kwh100 / (power90to100 < 3.5 ? 3.5 : power90to100);
+      }
     }
+
+    int totalMinutes = (totalHours * 60).round();
+    int h = totalMinutes ~/ 60;
+    int m = totalMinutes % 60;
+
+    if (h > 0) {
+      return "$h시간 $m분 남음";
+    } else {
+      return "$m분 남음";
+    }
+  }
+
+  // 시간당 충전율 (%/h)
+  String _calculateChargeRatePerHour() {
+    if (_chargePowerKw < 0.2) return "(0.0 %/h)";
+    double rate = (_chargePowerKw / _batteryTotalKwh) * 100.0;
+    return "(+${rate.toStringAsFixed(1)} %/h)";
+  }
+
+  // 캠핑 모드 잔여 시간 계산
+  String _calculateCampingRemainingTime(double targetSoc) {
+    double consumeKw = _powerKw.abs();
+    if (consumeKw < 0.05) return "소모 없음 (대기 중)";
 
     double currentKwh = _batteryTotalKwh * (_soc / 100.0);
     double targetKwh = _batteryTotalKwh * (targetSoc / 100.0);
     double availableKwh = currentKwh - targetKwh;
 
-    if (availableKwh <= 0) {
-      return "도달 완료";
-    }
+    if (availableKwh <= 0) return "도달 완료";
 
     double hours = availableKwh / consumeKw;
     if (hours > 99) return "99시간 이상";
@@ -127,10 +178,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
     int totalMinutes = (hours * 60).round();
     int h = totalMinutes ~/ 60;
     int m = totalMinutes % 60;
-
     return "$h시간 $m분";
   }
 
+  // 블루투스 연결 함수
   Future<void> _connectToLogger() async {
     if (_isConnected || _isConnecting) return;
 
@@ -265,6 +316,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       double calcPower = (_voltage * _current) / 1000.0;
       _powerKw = calcPower;
 
+      // 충전/회생 전력 추출
       if (_current < 0) {
         _chargePowerKw = calcPower.abs();
       } else {
@@ -288,7 +340,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
             children: [
               _buildHeader(),
               const SizedBox(height: 12),
-              // 모드에 따른 화면 렌더링
               Expanded(
                 child: _isCampingMode ? _buildCampingDashboard() : _buildStandardDashboard(),
               ),
@@ -318,7 +369,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
         ),
         Row(
           children: [
-            // 캠핑 모드 토글 버튼
             GestureDetector(
               onTap: () {
                 setState(() {
@@ -356,7 +406,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ),
             ),
             const SizedBox(width: 8),
-            // 테마 버튼
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
               decoration: BoxDecoration(
@@ -373,7 +422,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ),
             ),
             const SizedBox(width: 8),
-            // 연결 상태 버튼
             GestureDetector(
               onTap: _connectToLogger,
               child: Container(
@@ -410,7 +458,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  // 기본 주행 대시보드
   Widget _buildStandardDashboard() {
     return Row(
       children: [
@@ -423,14 +470,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  // 캠핑 모드 전용 대시보드
   Widget _buildCampingDashboard() {
     double consumeWatts = (_voltage * _current).abs();
     double percentPerHour = consumeWatts > 0 ? (consumeWatts / (_batteryTotalKwh * 1000)) * 100 : 0.0;
 
     return Row(
       children: [
-        // 좌측: SOC 및 실시간 소모 전력
         Expanded(
           flex: 4,
           child: Container(
@@ -480,7 +525,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ),
         const SizedBox(width: 14),
-        // 우측: 20% 마진 및 0% 완전방전까지 잔여 시간 카드
         Expanded(
           flex: 6,
           child: Column(
@@ -488,7 +532,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               Expanded(
                 child: _buildCampingTimeCard(
                   title: "🛡️ 복귀 마진 (배터리 20% 도달까지)",
-                  remainingTime: _calculateRemainingTime(20.0),
+                  remainingTime: _calculateCampingRemainingTime(20.0),
                   subInfo: "남은 사용 가능량: ${((_soc - 20).clamp(0, 100) * _batteryTotalKwh / 100).toStringAsFixed(1)} kWh",
                   accentColor: const Color(0xFF00E5FF),
                 ),
@@ -497,7 +541,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               Expanded(
                 child: _buildCampingTimeCard(
                   title: "⚠️ 한계 마진 (배터리 0% 완전 방전까지)",
-                  remainingTime: _calculateRemainingTime(0.0),
+                  remainingTime: _calculateCampingRemainingTime(0.0),
                   subInfo: "총 잔여 전력량: ${(_soc * _batteryTotalKwh / 100).toStringAsFixed(1)} kWh",
                   accentColor: const Color(0xFFFF5252),
                 ),
@@ -614,19 +658,87 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  // ==========================================
+  // ⚡ 가변형 우측 패널 (주행 / 회생 / 충전 자동 전환)
+  // ==========================================
   Widget _buildRightPanel() {
+    bool isChargingOrRegen = _chargePowerKw > 0.1;
+    bool isFastCharge = _chargePowerKw > 10.0;
+    
+    // 타이틀 및 서브텍스트 결정
+    String cardTitle = "실시간 충전량";
+    Color titleColor = Colors.white70;
+    String subRate = _calculateChargeRatePerHour();
+    String? bottomNotice;
+
+    if (isChargingOrRegen) {
+      if (_current < -5.0 && _chargePowerKw > 1.0) {
+        // 충전기 연결 상태
+        cardTitle = isFastCharge ? "⚡ 급속 충전 중" : "🔌 완속 충전 중";
+        titleColor = const Color(0xFFFFB300);
+        bottomNotice = "완충까지: ${_calculateChargeTimeToFull()}";
+      } else {
+        // 회생제동 상태
+        cardTitle = "♻️ 회생제동 충전 중";
+        titleColor = const Color(0xFFFF9100);
+      }
+    }
+
     return Column(
       children: [
+        // 상단 가변 충전/회생 카드
         Expanded(
-          child: _buildCard(
-            title: "실시간 충전량",
-            valueText: _chargePowerKw.toStringAsFixed(1),
-            unitText: "kW",
-            valueColor: const Color(0xFFFFB300),
-            subText: "(0.0 %/h)",
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF13171D),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: isChargingOrRegen ? const Color(0xFFFFB300).withOpacity(0.6) : const Color(0xFF222A35),
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(cardTitle, style: TextStyle(color: titleColor, fontSize: 11, fontWeight: FontWeight.bold)),
+                    Text(subRate, style: TextStyle(color: isChargingOrRegen ? const Color(0xFFFFB300) : Colors.white38, fontSize: 10)),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  textBaseline: TextBaseline.alphabetic,
+                  children: [
+                    Text(
+                      _chargePowerKw.toStringAsFixed(1),
+                      style: TextStyle(
+                        color: isChargingOrRegen ? const Color(0xFFFFB300) : Colors.white38,
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    const Text("kW", style: TextStyle(color: Colors.white54, fontSize: 12)),
+                  ],
+                ),
+                if (bottomNotice != null) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    bottomNotice,
+                    style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 10, fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ],
+            ),
           ),
         ),
         const SizedBox(height: 12),
+        // 하단 실시간 배터리 전력 카드
         Expanded(
           child: _buildCard(
             title: "실시간 배터리 전력",
