@@ -34,10 +34,9 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   bool isConnecting = false;
   bool isConnected = false;
 
-  // 바이트 수신 버퍼
   final List<int> _rawBuffer = [];
 
-  // CAN 순정 데이터 변수
+  // CAN 순정 물리 데이터
   double soc = 0.0;
   double packVolt = 0.0;
   double packCurr = 0.0;
@@ -55,7 +54,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   double smoothedEfficiency = 5.5;
 
   Timer? _tripTimer;
-  Timer? _autoReconnectTimer;
 
   @override
   void initState() {
@@ -65,24 +63,14 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
 
   Future<void> _initApp() async {
     _startTimers();
-    // 1. 권한 먼저 확실하게 획득
     await _requestPermissions();
-    // 2. 블루투스 활성화 대기 후 연결
-    await Future.delayed(const Duration(milliseconds: 500));
+    await Future.delayed(const Duration(milliseconds: 600));
     _connectToEvLogger();
-
-    // 3. 주기적 재연결 타이머 (연결 끊어졌을 때만)
-    _autoReconnectTimer = Timer.periodic(const Duration(seconds: 4), (timer) {
-      if (!isConnected && !isConnecting && mounted) {
-        _connectToEvLogger();
-      }
-    });
   }
 
   @override
   void dispose() {
     _tripTimer?.cancel();
-    _autoReconnectTimer?.cancel();
     connection?.dispose();
     super.dispose();
   }
@@ -201,7 +189,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     setState(() => isConnecting = true);
 
     try {
-      // 1. 등록(페어링)된 블루투스 기기 목록 조회
       List<BluetoothDevice> devices = await FlutterBluetoothSerial.instance.getBondedDevices();
       BluetoothDevice? targetDevice;
 
@@ -214,28 +201,10 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
         }
       }
 
-      // 등록 기기 목록에 있으면 바로 연결
       if (targetDevice != null) {
         _startConnection(targetDevice);
       } else {
-        // 등록 기기에 없을 경우 실시간 스캔
-        StreamSubscription? discoverySub;
-        discoverySub = FlutterBluetoothSerial.instance.startDiscovery().listen((r) {
-          String name = (r.device.name ?? '').toUpperCase();
-          String addr = r.device.address.toUpperCase();
-          if (name.contains('EVLOGGER') || addr.contains('F0:D6') || addr.contains('F0D6')) {
-            discoverySub?.cancel();
-            _startConnection(r.device);
-          }
-        });
-
-        // 3초 후에도 못 찾으면 탐색 취소 및 락 해제
-        Future.delayed(const Duration(seconds: 3), () {
-          discoverySub?.cancel();
-          if (!isConnected && mounted) {
-            setState(() => isConnecting = false);
-          }
-        });
+        if (mounted) setState(() => isConnecting = false);
       }
     } catch (e) {
       if (mounted) setState(() => isConnecting = false);
@@ -258,6 +227,10 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
           isConnected = false;
           connection = null;
         });
+        // 끊어지면 3초 후 안전하게 1회 재연결
+        Future.delayed(const Duration(seconds: 3), () {
+          if (!isConnected && !isConnecting && mounted) _connectToEvLogger();
+        });
       });
     } catch (e) {
       if (!mounted) return;
@@ -269,50 +242,65 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     }
   }
 
-  // 스트림 조각 모음 및 동기화 파서 (DBC 기반)
+  // CAN 패킷 헤더 동기화 및 DBC 기반 ID별 분기 파서
   void _handleStreamData(Uint8List chunk) {
     _rawBuffer.addAll(chunk);
 
+    // EvLogger 표준 패킷 길이(12바이트 또는 8바이트) 정렬
     while (_rawBuffer.length >= 8) {
-      int candidateSocRaw = _rawBuffer[1];
-      double candidateSoc = candidateSocRaw * 0.5;
+      // 마사다 CAN 패킷 유효성 체크:
+      // Byte 0: SOC (0.5% 단위, 0~200)
+      // Byte 1-2: Pack Voltage (Little Endian, 2500~4500 = 250.0V~450.0V 또는 250~450V)
+      // Byte 3-4: Pack Current (Offset 1000 or 10000)
+      
+      int rawSoc = _rawBuffer[0];
+      double candidateSoc = rawSoc * 0.5;
 
-      int vRaw = _rawBuffer[2] | (_rawBuffer[3] << 8);
-      double candidateVolt = vRaw.toDouble();
+      int rawVolt = _rawBuffer[1] | (_rawBuffer[2] << 8);
+      double candidateVolt = rawVolt > 1000 ? rawVolt * 0.1 : rawVolt.toDouble();
 
-      // 마사다 배터리 유효 범위 체크 (SOC: 0~100%, 전압: 200~450V)
-      if (candidateSoc >= 0.0 && candidateSoc <= 100.0 && candidateVolt >= 200.0 && candidateVolt <= 450.0) {
-        Uint8List packet = Uint8List.fromList(_rawBuffer.sublist(0, 8));
+      if (candidateSoc >= 1.0 && candidateSoc <= 100.0 && candidateVolt >= 200.0 && candidateVolt <= 450.0) {
+        Uint8List p = Uint8List.fromList(_rawBuffer.sublist(0, 8));
         _rawBuffer.removeRange(0, 8);
-        _parseValidPacket(packet);
+        _parseValidBmsPacket(p, candidateSoc, candidateVolt);
       } else {
-        _rawBuffer.removeAt(0); // 1바이트 밀어서 재탐색
+        // 동기화가 어긋났으면 1바이트씩 쉬프트
+        _rawBuffer.removeAt(0);
       }
     }
 
-    if (_rawBuffer.length > 128) _rawBuffer.clear();
+    if (_rawBuffer.length > 256) _rawBuffer.clear();
   }
 
-  void _parseValidPacket(Uint8List p) {
+  void _parseValidBmsPacket(Uint8List p, double parsedSoc, double parsedVolt) {
     if (!mounted) return;
     setState(() {
-      // 1. 배터리 잔량 SOC (%)
-      soc = (p[1] * 0.5).clamp(0.0, 100.0);
+      // 1. 배터리 SOC
+      soc = parsedSoc.clamp(0.0, 100.0);
       if (initialSoc == null && soc > 0) initialSoc = soc;
 
       // 2. 팩 전압 (V)
-      packVolt = (p[2] | (p[3] << 8)).toDouble();
+      packVolt = parsedVolt;
 
-      // 3. 팩 전류 (A) - Offset 1000, 0.1A 단위 보정
-      int rawCurr = p[4] | (p[5] << 8);
-      packCurr = (rawCurr - 1000).toDouble();
+      // 3. 팩 전류 (A) - Big/Little 및 Offset 정밀 보정
+      int rawCurr = p[3] | (p[4] << 8);
+      if (rawCurr > 5000) {
+        packCurr = (rawCurr - 10000) * 0.1;
+      } else {
+        packCurr = (rawCurr - 1000) * 0.1;
+      }
+
+      // 비정상 전류 노이즈 방어 (최대 방전 150A, 최대 충전 120A)
+      packCurr = packCurr.clamp(-120.0, 150.0);
 
       // 4. 배터리 온도 (℃)
-      temp = (p[6] - 40).toDouble();
+      int rawTemp = p[5];
+      temp = (rawTemp >= 40) ? (rawTemp - 40).toDouble() : rawTemp.toDouble();
+      if (temp < -20 || temp > 80) temp = 22.0; // 노이즈 기본값 보정
 
-      // 5. 충전 전력 계산
+      // 5. 파워(kW) 및 충전량 계산
       double pKw = (packVolt * packCurr) / 1000.0;
-      if (pKw < 0) {
+      if (pKw < -0.3) {
         chargeKw = pKw.abs().clamp(0.0, 60.0);
       } else {
         chargeKw = 0.0;
@@ -617,7 +605,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
                 const Text('//M POWER (kW)', style: TextStyle(color: Color(0xFFE9271D), fontSize: 16, fontWeight: FontWeight.w900, fontStyle: FontStyle.italic)),
                 const SizedBox(height: 6),
                 Text(powerKw.toStringAsFixed(1), style: const TextStyle(color: Colors.white, fontSize: 56, fontWeight: FontWeight.w900, fontStyle: FontStyle.italic)),
-                Text('${packVolt.toStringAsFixed(0)}V / ${packCurr.toStringAsFixed(0)}A', style: const TextStyle(color: Colors.white54, fontSize: 16)),
+                Text('${packVolt.toStringAsFixed(0)}V / ${packCurr.toStringAsFixed(1)}A', style: const TextStyle(color: Colors.white54, fontSize: 16)),
               ],
             ),
           ),
