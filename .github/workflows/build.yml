@@ -23,16 +23,30 @@ jobs:
           flutter-version: '3.19.6'
           channel: 'stable'
 
-      - name: Install dependencies
-        working-directory: ./masada_project
-        run: flutter pub get
+      - name: Create Base Project & Overwrite Code
+        run: |
+          # 1. 완전한 안드로이드 뼈대 프로젝트 자동 생성
+          flutter create masada_app --org com.masada
+          
+          # 2. 블루투스 및 권한 의존성 패키지 자동 주입
+          cd masada_app
+          flutter pub add flutter_bluetooth_serial:^0.4.0 permission_handler:^11.3.0
+          
+          # 3. 우리가 작성한 대시보드 코드로 main.dart 덮어쓰기
+          cp ../masada_project/lib/main.dart lib/main.dart
+          
+          # 4. 안드로이드 블루투스 권한 자동 설정
+          sed -i 's/<application/<uses-permission android:name="android.permission.BLUETOOTH" \/>\n    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" \/>\n    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" \/>\n    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" \/>\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" \/>\n    <application/' android/app/src/main/AndroidManifest.xml
+          
+          # 5. 구형 태블릿 지원을 위해 minSdkVersion 21로 변경
+          sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/' android/app/build.gradle
 
-      - name: Build APK
-        working-directory: ./masada_project
+      - name: Build Multi-Arch APK
+        working-directory: masada_app
         run: flutter build apk --release --target-platform android-arm,android-arm64,android-x64
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Masada-Monitor-APK
-          path: masada_project/build/app/outputs/flutter-apk/app-release.apk
+          path: masada_app/build/app/outputs/flutter-apk/app-release.apk
