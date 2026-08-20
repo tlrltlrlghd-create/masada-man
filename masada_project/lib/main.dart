@@ -38,7 +38,8 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   bool isConnected = false;
   String connectionStatusText = '10초 후 자동 연결...';
 
-  final List<int> _rawBuffer = [];
+  final List<int> _byteBuffer = [];
+  String _asciiBuffer = '';
 
   // DBC 순정 규격 물리 데이터
   double soc = 0.0;
@@ -61,6 +62,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   double smoothedEfficiency = 5.5;
 
   Timer? _tripTimer;
+  Timer? _uiRefreshTimer;
   Timer? _reconnectLoopTimer;
   Timer? _initialDelayTimer;
 
@@ -74,12 +76,14 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     _startTimers();
     await _requestPermissions();
 
+    // 1. 앱 켜지고 정확히 10초 대기 후 최초 1회 연결 시도
     _initialDelayTimer = Timer(const Duration(seconds: 10), () {
       if (mounted && !isConnected && !isConnecting) {
         _connectToEvLogger();
       }
     });
 
+    // 2. 10초 이후 완전히 끊겨있을 때만 5초 주기로 재연결
     _reconnectLoopTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
       if (totalSeconds >= 10 && !isConnected && !isConnecting && mounted) {
         _connectToEvLogger();
@@ -90,6 +94,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   @override
   void dispose() {
     _tripTimer?.cancel();
+    _uiRefreshTimer?.cancel();
     _initialDelayTimer?.cancel();
     _reconnectLoopTimer?.cancel();
     connection?.dispose();
@@ -99,30 +104,34 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   void _startTimers() {
     _tripTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (!mounted) return;
-      setState(() {
-        totalSeconds++;
-        if (speed > 0) tripDistance += (speed / 3600.0);
+      totalSeconds++;
+      if (speed > 0) tripDistance += (speed / 3600.0);
 
+      _chargePowerBuffer.addLast(chargeKw);
+      if (_chargePowerBuffer.length > 5) _chargePowerBuffer.removeFirst();
+      smoothedChargeKw = _chargePowerBuffer.reduce((a, b) => a + b) / _chargePowerBuffer.length;
+
+      double instantEfficiency = 5.5;
+      double powerKw = (packVolt * packCurr) / 1000.0;
+      if (powerKw < 0) {
+        instantEfficiency = 9.9;
+      } else if (powerKw > 0.5 && speed > 1.0) {
+        instantEfficiency = (speed / powerKw).clamp(0.0, 15.0);
+      }
+
+      efficiencyQueue.addLast(instantEfficiency);
+      if (efficiencyQueue.length > 5) efficiencyQueue.removeFirst();
+      smoothedEfficiency = efficiencyQueue.reduce((a, b) => a + b) / efficiencyQueue.length;
+      historicalEfficiency = (historicalEfficiency * 0.8) + (instantEfficiency * 0.2);
+    });
+
+    // 0.2초(5Hz) 단위로 UI 렌더링을 묶어 블루투스 부하 및 끊김 원천 차단
+    _uiRefreshTimer = Timer.periodic(const Duration(milliseconds: 200), (timer) {
+      if (!mounted) return;
+      setState(() {
         if (!isConnected && !isConnecting && totalSeconds < 10) {
           connectionStatusText = '${10 - totalSeconds}초 후 자동 연결';
         }
-
-        _chargePowerBuffer.addLast(chargeKw);
-        if (_chargePowerBuffer.length > 5) _chargePowerBuffer.removeFirst();
-        smoothedChargeKw = _chargePowerBuffer.reduce((a, b) => a + b) / _chargePowerBuffer.length;
-
-        double instantEfficiency = 5.5;
-        double powerKw = (packVolt * packCurr) / 1000.0;
-        if (powerKw < 0) {
-          instantEfficiency = 9.9;
-        } else if (powerKw > 0.5 && speed > 1.0) {
-          instantEfficiency = (speed / powerKw).clamp(0.0, 15.0);
-        }
-
-        efficiencyQueue.addLast(instantEfficiency);
-        if (efficiencyQueue.length > 5) efficiencyQueue.removeFirst();
-        smoothedEfficiency = efficiencyQueue.reduce((a, b) => a + b) / efficiencyQueue.length;
-        historicalEfficiency = (historicalEfficiency * 0.8) + (instantEfficiency * 0.2);
       });
     });
   }
@@ -273,8 +282,10 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
         connectionStatusText = 'EvLogger 연결됨';
       });
 
+      // 자살 리셋 명령어(ATZ) 완전히 제거! 순수 수신 대기
+
       conn.input?.listen(
-        _handleStreamData,
+        _handleIncomingData,
         onDone: () {
           if (!mounted) return;
           setState(() {
@@ -305,86 +316,161 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     }
   }
 
-  // DBC 순정 규격 기반 다중 패킷 식별 파서
-  void _handleStreamData(Uint8List chunk) {
-    _rawBuffer.addAll(chunk);
+  // CAN 패킷 파서 (바이너리 + 아스키 전방위 지원)
+  void _handleIncomingData(Uint8List chunk) {
+    // 1. 아스키 텍스트 파싱
+    String textChunk = String.fromCharCodes(chunk);
+    _asciiBuffer += textChunk;
 
-    while (_rawBuffer.length >= 8) {
-      // 1. BMS_VCU_1 패킷 검증 (PackVolt: 16|16, PackCurr: 32|16, HTemp: 48|8)
-      int candidateVolt = _rawBuffer[2] | (_rawBuffer[3] << 8);
-      int candidateRawCurr = _rawBuffer[4] | (_rawBuffer[5] << 8);
-      int candidateTemp = _rawBuffer[6];
+    if (_asciiBuffer.contains('\r') || _asciiBuffer.contains('\n')) {
+      List<String> lines = _asciiBuffer.split(RegExp(r'[\r\n]+'));
+      _asciiBuffer = lines.last;
 
-      if (candidateVolt >= 200 && candidateVolt <= 450 && candidateRawCurr >= 500 && candidateRawCurr <= 1500) {
-        Uint8List p = Uint8List.fromList(_rawBuffer.sublist(0, 8));
-        _rawBuffer.removeRange(0, 8);
-        _parseBmsVcu1(p, candidateVolt, candidateRawCurr, candidateTemp);
-        continue;
+      for (int i = 0; i < lines.length - 1; i++) {
+        _parseAsciiLine(lines[i].trim());
+      }
+    }
+    if (_asciiBuffer.length > 512) _asciiBuffer = '';
+
+    // 2. 바이너리 스트림 슬라이딩 윈도우 파싱
+    _byteBuffer.addAll(chunk);
+
+    while (_byteBuffer.length >= 12) {
+      // 0x0CFF7D03 (BMS_VCU_0) 탐색 (빅엔디언 / 리틀엔디언)
+      bool is7D = false;
+      bool is7E = false;
+      int headerSize = 0;
+
+      if (_byteBuffer[0] == 0x0C && _byteBuffer[1] == 0xFF && _byteBuffer[2] == 0x7D && _byteBuffer[3] == 0x03) {
+        is7D = true;
+        headerSize = (_byteBuffer.length > 4 && _byteBuffer[4] == 8) ? 5 : 4;
+      } else if (_byteBuffer[0] == 0x03 && _byteBuffer[1] == 0x7D && _byteBuffer[2] == 0xFF && _byteBuffer[3] == 0x0C) {
+        is7D = true;
+        headerSize = 4;
+      } else if (_byteBuffer[0] == 0x0C && _byteBuffer[1] == 0xFF && _byteBuffer[2] == 0x7E && _byteBuffer[3] == 0x03) {
+        is7E = true;
+        headerSize = (_byteBuffer.length > 4 && _byteBuffer[4] == 8) ? 5 : 4;
+      } else if (_byteBuffer[0] == 0x03 && _byteBuffer[1] == 0x7E && _byteBuffer[2] == 0xFF && _byteBuffer[3] == 0x0C) {
+        is7E = true;
+        headerSize = 4;
       }
 
-      // 2. BMS_VCU_0 패킷 검증 (BMS_SOC: 8|8, CellHVolt: 24|16, CellLVolt: 48|16)
-      int candidateRawSoc = _rawBuffer[1];
-      double candidateSoc = candidateRawSoc * 0.5;
-      int candidateHVolt = _rawBuffer[3] | (_rawBuffer[4] << 8);
-
-      if (candidateSoc >= 1.0 && candidateSoc <= 100.0 && candidateHVolt >= 2000 && candidateHVolt <= 4500) {
-        Uint8List p = Uint8List.fromList(_rawBuffer.sublist(0, 8));
-        _rawBuffer.removeRange(0, 8);
-        _parseBmsVcu0(p, candidateSoc);
-        continue;
+      if (is7D) {
+        if (_byteBuffer.length >= headerSize + 8) {
+          List<int> data = _byteBuffer.sublist(headerSize, headerSize + 8);
+          _byteBuffer.removeRange(0, headerSize + 8);
+          _processBmsVcu0(data);
+          continue;
+        } else {
+          break;
+        }
       }
 
-      // 일치하지 않는 바이트 쉬프트
-      _rawBuffer.removeAt(0);
+      if (is7E) {
+        if (_byteBuffer.length >= headerSize + 8) {
+          List<int> data = _byteBuffer.sublist(headerSize, headerSize + 8);
+          _byteBuffer.removeRange(0, headerSize + 8);
+          _processBmsVcu1(data);
+          continue;
+        } else {
+          break;
+        }
+      }
+
+      _byteBuffer.removeAt(0);
     }
 
-    if (_rawBuffer.length > 256) _rawBuffer.clear();
+    if (_byteBuffer.length > 256) _byteBuffer.clear();
   }
 
-  // BO_ 2365553923 BMS_VCU_0 파싱 (SOC, 셀전압)
-  void _parseBmsVcu0(Uint8List p, double parsedSoc) {
-    if (!mounted) return;
-    setState(() {
-      // SG_ BMS_SOC : 8|8@1+ (0.5,0)
-      soc = parsedSoc.clamp(0.0, 100.0);
-      if (initialSoc == null && soc > 0) initialSoc = soc;
+  void _parseAsciiLine(String line) {
+    if (line.isEmpty) return;
+    String clean = line.replaceAll(' ', '').toUpperCase();
 
-      // SG_ BMS_CellHVolt : 24|16@1+ (0.001,0)
-      int rawHVolt = p[3] | (p[4] << 8);
-      maxCellVolt = rawHVolt * 0.001;
-
-      // SG_ BMS_CellLVolt : 48|16@1+ (0.001,0)
-      int rawLVolt = p[6] | (p[7] << 8);
-      minCellVolt = rawLVolt * 0.001;
-    });
-  }
-
-  // BO_ 2365554179 BMS_VCU_1 파싱 (전압, 전류, 온도, SOH)
-  void _parseBmsVcu1(Uint8List p, int parsedVolt, int parsedRawCurr, int parsedRawTemp) {
-    if (!mounted) return;
-    setState(() {
-      // SG_ BMS_SOH : 8|8@1+ (1,0)
-      soh = p[1].toDouble();
-
-      // SG_ BMS_PackVolt : 16|16@1+ (1,0) [0|800] "V"
-      packVolt = parsedVolt.toDouble();
-
-      // SG_ BMS_PackCurr : 32|16@1+ (1,-1000) [-1000|1000] "A"
-      packCurr = (parsedRawCurr - 1000).toDouble();
-      packCurr = packCurr.clamp(-120.0, 150.0);
-
-      // SG_ BMS_Htemp : 48|8@1+ (1,-40) [-40|200] "°C"
-      temp = (parsedRawTemp - 40).toDouble();
-      if (temp < -20 || temp > 80) temp = 22.0;
-
-      // 실시간 파워 (kW)
-      double pKw = (packVolt * packCurr) / 1000.0;
-      if (pKw < -0.3) {
-        chargeKw = pKw.abs().clamp(0.0, 60.0);
-      } else {
-        chargeKw = 0.0;
+    if (clean.contains('CFF7D03') || clean.contains('18F001D0') || clean.contains('7D03')) {
+      List<int> bytes = _extractHexBytes(clean);
+      if (bytes.length >= 8) {
+        _processBmsVcu0(bytes.sublist(bytes.length - 8));
       }
-    });
+    } else if (clean.contains('CFF7E03') || clean.contains('18F002D0') || clean.contains('7E03')) {
+      List<int> bytes = _extractHexBytes(clean);
+      if (bytes.length >= 8) {
+        _processBmsVcu1(bytes.sublist(bytes.length - 8));
+      }
+    }
+  }
+
+  List<int> _extractHexBytes(String hex) {
+    List<int> res = [];
+    int startIdx = hex.indexOf('8');
+    String target = (startIdx != -1 && hex.length >= startIdx + 17) ? hex.substring(startIdx + 1) : hex;
+
+    for (int i = 0; i < target.length - 1; i += 2) {
+      int? v = int.tryParse(target.substring(i, i + 2), radix: 16);
+      if (v != null) res.add(v);
+    }
+    return res;
+  }
+
+  // BO_ 2365553923 BMS_VCU_0 : SOC & Cell Volts
+  void _processBmsVcu0(List<int> d) {
+    if (d.length < 8) return;
+
+    // SG_ BMS_SOC : 8|8@1+ (0.5,0)
+    double parsedSoc = d[1] * 0.5;
+    if (parsedSoc >= 1.0 && parsedSoc <= 100.0) {
+      soc = parsedSoc;
+      if (initialSoc == null && soc > 0) initialSoc = soc;
+    }
+
+    // SG_ BMS_CellHVolt : 24|16@1+ (0.001,0)
+    int rawHVolt = d[3] | (d[4] << 8);
+    if (rawHVolt >= 2000 && rawHVolt <= 4500) {
+      maxCellVolt = rawHVolt * 0.001;
+    }
+
+    // SG_ BMS_CellLVolt : 48|16@1+ (0.001,0)
+    int rawLVolt = d[6] | (d[7] << 8);
+    if (rawLVolt >= 2000 && rawLVolt <= 4500) {
+      minCellVolt = rawLVolt * 0.001;
+    }
+  }
+
+  // BO_ 2365554179 BMS_VCU_1 : Volt, Curr, Temp, SOH
+  void _processBmsVcu1(List<int> d) {
+    if (d.length < 8) return;
+
+    // SG_ BMS_SOH : 8|8@1+ (1,0)
+    if (d[1] >= 40 && d[1] <= 100) {
+      soh = d[1].toDouble();
+    }
+
+    // SG_ BMS_PackVolt : 16|16@1+ (1,0) [0|800] "V"
+    int rawVolt = d[2] | (d[3] << 8);
+    if (rawVolt >= 200 && rawVolt <= 450) {
+      packVolt = rawVolt.toDouble();
+    }
+
+    // SG_ BMS_PackCurr : 32|16@1+ (1,-1000) [-1000|1000] "A"
+    int rawCurr = d[4] | (d[5] << 8);
+    if (rawCurr >= 500 && rawCurr <= 1500) {
+      packCurr = (rawCurr - 1000).toDouble();
+      packCurr = packCurr.clamp(-120.0, 150.0);
+    }
+
+    // SG_ BMS_Htemp : 48|8@1+ (1,-40) [-40|200] "°C"
+    int rawTemp = d[6];
+    if (rawTemp >= 20 && rawTemp <= 140) {
+      temp = (rawTemp - 40).toDouble();
+    }
+
+    // 실시간 파워 (kW)
+    double pKw = (packVolt * packCurr) / 1000.0;
+    if (pKw < -0.3) {
+      chargeKw = pKw.abs().clamp(0.0, 60.0);
+    } else {
+      chargeKw = 0.0;
+    }
   }
 
   @override
