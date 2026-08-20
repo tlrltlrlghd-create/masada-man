@@ -38,6 +38,9 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   bool isConnected = false;
   String connectionStatusText = '10초 후 자동 연결...';
 
+  // 실시간 원시 데이터 디버그 표시용
+  String rawDebugText = '대기 중...';
+
   final List<int> _byteBuffer = [];
   String _asciiBuffer = '';
 
@@ -312,6 +315,12 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   }
 
   void _handleIncomingData(Uint8List chunk) {
+    // 실시간 원시 데이터 16진수 문자열로 디버그 박스 갱신
+    if (chunk.isNotEmpty) {
+      String hexPreview = chunk.take(16).map((b) => b.toRadixString(16).padLeft(2, '0').toUpperCase()).join(' ');
+      rawDebugText = '[$hexPreview] (len: ${chunk.length})';
+    }
+
     String textChunk = String.fromCharCodes(chunk);
     _asciiBuffer += textChunk;
 
@@ -490,11 +499,11 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
       backgroundColor: _getBgColor(),
       body: SafeArea(
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 8.0),
+          padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 6.0),
           child: Column(
             children: [
               _buildHeader(dynamicColor),
-              const SizedBox(height: 6),
+              const SizedBox(height: 4),
               Expanded(
                 child: _buildThemeBody(
                   dynamicColor: dynamicColor,
@@ -505,13 +514,34 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
                   eta: eta,
                 ),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 6),
               _buildBidirectionalPowerBar(powerKw),
-              const SizedBox(height: 8),
+              const SizedBox(height: 6),
               _buildFooter(usedSoc),
+              const SizedBox(height: 4),
+              _buildDebugBar(), // 화면 하단 실시간 원시 데이터 모니터
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  // 실시간 원시 데이터 디버그 표시 위젯
+  Widget _buildDebugBar() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+      decoration: BoxDecoration(
+        color: Colors.black54,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: Colors.white12),
+      ),
+      child: Text(
+        'RAW DATA: $rawDebugText',
+        style: const TextStyle(color: Color(0xFFFFD54F), fontSize: 11, fontFamily: 'monospace'),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
       ),
     );
   }
@@ -532,7 +562,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
         RichText(
           text: TextSpan(
             text: 'MASADA VAN ',
-            style: const TextStyle(color: Color(0xFF78909C), fontSize: 20, fontWeight: FontWeight.w900, letterSpacing: 1.5),
+            style: const TextStyle(color: Color(0xFF78909C), fontSize: 19, fontWeight: FontWeight.w900, letterSpacing: 1.5),
             children: [
               TextSpan(text: 'EV MONITOR', style: TextStyle(color: dynamicColor)),
             ],
@@ -547,15 +577,15 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
                 child: DropdownButton<EngineSoundType>(
                   value: currentSound,
                   dropdownColor: const Color(0xFF161A22),
-                  icon: const Icon(Icons.volume_up_outlined, color: Colors.cyanAccent, size: 20),
+                  icon: const Icon(Icons.volume_up_outlined, color: Colors.cyanAccent, size: 18),
                   onChanged: (newSound) {
                     if (newSound != null) setState(() => currentSound = newSound);
                   },
                   items: const [
-                    DropdownMenuItem(value: EngineSoundType.mute, child: Text('🔇 무음', style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold))),
-                    DropdownMenuItem(value: EngineSoundType.v8Engine, child: Text('🏎️ V8 트윈터보', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold))),
-                    DropdownMenuItem(value: EngineSoundType.ioniq5n, child: Text('⚡ 아이오닉 5 N', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold))),
-                    DropdownMenuItem(value: EngineSoundType.porscheEsound, child: Text('🛸 포르쉐 E-Sound', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold))),
+                    DropdownMenuItem(value: EngineSoundType.mute, child: Text('🔇 무음', style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold))),
+                    DropdownMenuItem(value: EngineSoundType.v8Engine, child: Text('🏎️ V8 트윈터보', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold))),
+                    DropdownMenuItem(value: EngineSoundType.ioniq5n, child: Text('⚡ 아이오닉 5 N', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold))),
+                    DropdownMenuItem(value: EngineSoundType.porscheEsound, child: Text('🛸 포르쉐 E-Sound', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold))),
                   ],
                 ),
               ),
@@ -568,15 +598,15 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
                 child: DropdownButton<DashboardTheme>(
                   value: currentTheme,
                   dropdownColor: const Color(0xFF161A22),
-                  icon: Icon(Icons.palette_outlined, color: dynamicColor, size: 20),
+                  icon: Icon(Icons.palette_outlined, color: dynamicColor, size: 18),
                   onChanged: (newTheme) {
                     if (newTheme != null) setState(() => currentTheme = newTheme);
                   },
                   items: const [
-                    DropdownMenuItem(value: DashboardTheme.originalNeon, child: Text('🟢 오리지널 네온', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold))),
-                    DropdownMenuItem(value: DashboardTheme.teslaMinimal, child: Text('⚡ 테슬라 스타일', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold))),
-                    DropdownMenuItem(value: DashboardTheme.bmwDynamic, child: Text('🔴 BMW M 스타일', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold))),
-                    DropdownMenuItem(value: DashboardTheme.bydOcean, child: Text('🌊 BYD 오션 스타일', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold))),
+                    DropdownMenuItem(value: DashboardTheme.originalNeon, child: Text('🟢 오리지널 네온', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold))),
+                    DropdownMenuItem(value: DashboardTheme.teslaMinimal, child: Text('⚡ 테슬라 스타일', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold))),
+                    DropdownMenuItem(value: DashboardTheme.bmwDynamic, child: Text('🔴 BMW M 스타일', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold))),
+                    DropdownMenuItem(value: DashboardTheme.bydOcean, child: Text('🌊 BYD 오션 스타일', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold))),
                   ],
                 ),
               ),
@@ -592,7 +622,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
               },
               borderRadius: BorderRadius.circular(20),
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
                 decoration: BoxDecoration(
                   color: isConnected ? const Color(0x1400E676) : const Color(0x14FF5252),
                   borderRadius: BorderRadius.circular(20),
@@ -601,8 +631,8 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
                 child: Row(
                   children: [
                     Container(
-                      width: 9,
-                      height: 9,
+                      width: 8,
+                      height: 8,
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
                         color: isConnected ? const Color(0xFF00E676) : const Color(0xFFFF5252),
@@ -619,7 +649,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
                       isConnected ? 'EvLogger 연결됨' : connectionStatusText,
                       style: TextStyle(
                         color: isConnected ? const Color(0xFF00E676) : const Color(0xFFFF5252),
-                        fontSize: 13,
+                        fontSize: 12,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
@@ -681,23 +711,23 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
           flex: 14,
           child: Center(
             child: SizedBox(
-              width: 320,
-              height: 320,
+              width: 290,
+              height: 290,
               child: CustomPaint(
                 painter: HtmlExactGaugePainter(soc: soc, targetColor: dynamicColor),
                 child: Center(
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      const Text('BATTERY', style: TextStyle(color: Color(0xFF78909C), fontSize: 16, fontWeight: FontWeight.w800, letterSpacing: 4.0)),
+                      const Text('BATTERY', style: TextStyle(color: Color(0xFF78909C), fontSize: 15, fontWeight: FontWeight.w800, letterSpacing: 4.0)),
                       const SizedBox(height: 2),
                       Row(
                         mainAxisSize: MainAxisSize.min,
                         crossAxisAlignment: CrossAxisAlignment.baseline,
                         textBaseline: TextBaseline.alphabetic,
                         children: [
-                          Text(soc.toStringAsFixed(1), style: TextStyle(color: dynamicColor, fontSize: 76, fontWeight: FontWeight.w900, height: 1.0)),
-                          const Text('%', style: TextStyle(color: Color(0xFF00E676), fontSize: 32, fontWeight: FontWeight.bold)),
+                          Text(soc.toStringAsFixed(1), style: TextStyle(color: dynamicColor, fontSize: 70, fontWeight: FontWeight.w900, height: 1.0)),
+                          const Text('%', style: TextStyle(color: Color(0xFF00E676), fontSize: 28, fontWeight: FontWeight.bold)),
                         ],
                       ),
                     ],
@@ -734,40 +764,40 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     return Column(
       children: [
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 16),
-          decoration: BoxDecoration(color: const Color(0xFF222226), borderRadius: BorderRadius.circular(18)),
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+          decoration: BoxDecoration(color: const Color(0xFF222226), borderRadius: BorderRadius.circular(16)),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                const Text('BATTERY LEVEL', style: TextStyle(color: Colors.white54, fontSize: 14, fontWeight: FontWeight.bold)),
-                Text('${soc.toStringAsFixed(0)}%', style: TextStyle(color: dynamicColor, fontSize: 56, fontWeight: FontWeight.w900)),
+                const Text('BATTERY LEVEL', style: TextStyle(color: Colors.white54, fontSize: 13, fontWeight: FontWeight.bold)),
+                Text('${soc.toStringAsFixed(0)}%', style: TextStyle(color: dynamicColor, fontSize: 50, fontWeight: FontWeight.w900)),
               ]),
               if (etaText.isNotEmpty)
-                Text(etaText, style: const TextStyle(color: Color(0xFFFFB300), fontSize: 16, fontWeight: FontWeight.bold)),
+                Text(etaText, style: const TextStyle(color: Color(0xFFFFB300), fontSize: 15, fontWeight: FontWeight.bold)),
               Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                const Text('ESTIMATED RANGE', style: TextStyle(color: Colors.white54, fontSize: 14, fontWeight: FontWeight.bold)),
-                Text('${ecoRange.toStringAsFixed(0)} km', style: const TextStyle(color: Color(0xFF38BDF8), fontSize: 48, fontWeight: FontWeight.bold)),
+                const Text('ESTIMATED RANGE', style: TextStyle(color: Colors.white54, fontSize: 13, fontWeight: FontWeight.bold)),
+                Text('${ecoRange.toStringAsFixed(0)} km', style: const TextStyle(color: Color(0xFF38BDF8), fontSize: 44, fontWeight: FontWeight.bold)),
               ]),
             ],
           ),
         ),
-        const SizedBox(height: 14),
+        const SizedBox(height: 10),
         ClipRRect(
           borderRadius: BorderRadius.circular(8),
           child: LinearProgressIndicator(
             value: (soc / 100).clamp(0.0, 1.0),
-            minHeight: 14,
+            minHeight: 12,
             backgroundColor: const Color(0xFF222226),
             valueColor: AlwaysStoppedAnimation<Color>(dynamicColor),
           ),
         ),
-        const SizedBox(height: 14),
+        const SizedBox(height: 10),
         Expanded(
           child: Row(
             children: [
               Expanded(child: _buildDataCard('실시간 출력/충전', '${powerKw.toStringAsFixed(1)}', 'kW', dynamicColor, dynamicColor)),
-              const SizedBox(width: 14),
+              const SizedBox(width: 12),
               Expanded(child: _buildDataCard('배터리 전압/전류', '${packVolt.toStringAsFixed(0)}V / ${packCurr.toStringAsFixed(1)}A', '', Colors.white, const Color(0xFF38BDF8))),
             ],
           ),
@@ -781,39 +811,39 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
       children: [
         Expanded(
           child: Container(
-            padding: const EdgeInsets.all(20),
+            padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
               color: const Color(0xFF141A29),
-              borderRadius: BorderRadius.circular(18),
+              borderRadius: BorderRadius.circular(16),
               border: Border.all(color: const Color(0xFFE9271D), width: 3),
             ),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                const Text('//M POWER (kW)', style: TextStyle(color: Color(0xFFE9271D), fontSize: 16, fontWeight: FontWeight.w900, fontStyle: FontStyle.italic)),
-                const SizedBox(height: 6),
-                Text(powerKw.toStringAsFixed(1), style: const TextStyle(color: Colors.white, fontSize: 56, fontWeight: FontWeight.w900, fontStyle: FontStyle.italic)),
-                Text('${packVolt.toStringAsFixed(0)}V / ${packCurr.toStringAsFixed(1)}A', style: const TextStyle(color: Colors.white54, fontSize: 16)),
+                const Text('//M POWER (kW)', style: TextStyle(color: Color(0xFFE9271D), fontSize: 15, fontWeight: FontWeight.w900, fontStyle: FontStyle.italic)),
+                const SizedBox(height: 4),
+                Text(powerKw.toStringAsFixed(1), style: const TextStyle(color: Colors.white, fontSize: 50, fontWeight: FontWeight.w900, fontStyle: FontStyle.italic)),
+                Text('${packVolt.toStringAsFixed(0)}V / ${packCurr.toStringAsFixed(1)}A', style: const TextStyle(color: Colors.white54, fontSize: 15)),
               ],
             ),
           ),
         ),
-        const SizedBox(width: 16),
+        const SizedBox(width: 14),
         Expanded(
           child: Container(
-            padding: const EdgeInsets.all(20),
+            padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
               color: const Color(0xFF141A29),
-              borderRadius: BorderRadius.circular(18),
+              borderRadius: BorderRadius.circular(16),
               border: Border.all(color: const Color(0xFF0066B1), width: 3),
             ),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                const Text('BATTERY SOC', style: TextStyle(color: Color(0xFF0066B1), fontSize: 16, fontWeight: FontWeight.w900, fontStyle: FontStyle.italic)),
-                const SizedBox(height: 6),
-                Text('${soc.toStringAsFixed(0)}%', style: TextStyle(color: dynamicColor, fontSize: 56, fontWeight: FontWeight.w900, fontStyle: FontStyle.italic)),
-                Text('EST. ${ecoRange.toStringAsFixed(0)} km', style: const TextStyle(color: Color(0xFF00FF88), fontSize: 18, fontWeight: FontWeight.bold)),
+                const Text('BATTERY SOC', style: TextStyle(color: Color(0xFF0066B1), fontSize: 15, fontWeight: FontWeight.w900, fontStyle: FontStyle.italic)),
+                const SizedBox(height: 4),
+                Text('${soc.toStringAsFixed(0)}%', style: TextStyle(color: dynamicColor, fontSize: 50, fontWeight: FontWeight.w900, fontStyle: FontStyle.italic)),
+                Text('EST. ${ecoRange.toStringAsFixed(0)} km', style: const TextStyle(color: Color(0xFF00FF88), fontSize: 17, fontWeight: FontWeight.bold)),
               ],
             ),
           ),
@@ -829,31 +859,31 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
         Expanded(
           flex: 4,
           child: Container(
-            padding: const EdgeInsets.all(20),
+            padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
               color: const Color(0xFF06213F),
-              borderRadius: BorderRadius.circular(18),
+              borderRadius: BorderRadius.circular(16),
               border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.4)),
             ),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                const Text('BLADE BATTERY SOC', style: TextStyle(color: Color(0xFF00E5FF), fontSize: 14, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
-                const SizedBox(height: 8),
-                Text('${soc.toStringAsFixed(1)} %', style: TextStyle(color: dynamicColor, fontSize: 50, fontWeight: FontWeight.w900)),
-                const SizedBox(height: 8),
+                const Text('BLADE BATTERY SOC', style: TextStyle(color: Color(0xFF00E5FF), fontSize: 13, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 6),
+                Text('${soc.toStringAsFixed(1)} %', style: TextStyle(color: dynamicColor, fontSize: 46, fontWeight: FontWeight.w900)),
+                const SizedBox(height: 6),
                 LinearProgressIndicator(
                   value: (soc / 100).clamp(0.0, 1.0),
                   backgroundColor: Colors.black38,
                   valueColor: AlwaysStoppedAnimation<Color>(dynamicColor),
                 ),
-                const SizedBox(height: 10),
-                Text('주행 가능: ${ecoRange.toStringAsFixed(1)} km', style: const TextStyle(color: Colors.white70, fontSize: 16)),
+                const SizedBox(height: 8),
+                Text('주행 가능: ${ecoRange.toStringAsFixed(1)} km', style: const TextStyle(color: Colors.white70, fontSize: 15)),
               ],
             ),
           ),
         ),
-        const SizedBox(width: 14),
+        const SizedBox(width: 12),
         Expanded(
           flex: 6,
           child: Column(
@@ -869,7 +899,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
                   bottomInfo: etaText.isNotEmpty ? etaText : null,
                 ),
               ),
-              const SizedBox(height: 10),
+              const SizedBox(height: 8),
               Expanded(child: _buildDataCard('BMS 주행가능거리', bmsRange.toStringAsFixed(1), 'km', Colors.white, const Color(0xFF37474F))),
             ],
           ),
@@ -880,10 +910,10 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
 
   Widget _buildBidirectionalPowerBar(double powerKw) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
       decoration: BoxDecoration(
         color: const Color(0xFF0E1116),
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(12),
         border: Border.all(color: const Color(0xFF1C212C)),
       ),
       child: Column(
@@ -891,22 +921,22 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('◀ 회생제동 (REGEN)', style: TextStyle(color: Color(0xFF00E5FF), fontSize: 12, fontWeight: FontWeight.bold)),
+              const Text('◀ 회생제동 (REGEN)', style: TextStyle(color: Color(0xFF00E5FF), fontSize: 11, fontWeight: FontWeight.bold)),
               Text(
                 '실시간 파워: ${powerKw.toStringAsFixed(1)} kW',
                 style: TextStyle(
                   color: powerKw < 0 ? const Color(0xFF00FF88) : (powerKw > 30 ? const Color(0xFFFF3366) : const Color(0xFFFFB800)),
-                  fontSize: 14,
+                  fontSize: 13,
                   fontWeight: FontWeight.w900,
                   fontFamily: 'monospace',
                 ),
               ),
-              const Text('가속 출력 (POWER) ▶', style: TextStyle(color: Color(0xFFFF5252), fontSize: 12, fontWeight: FontWeight.bold)),
+              const Text('가속 출력 (POWER) ▶', style: TextStyle(color: Color(0xFFFF5252), fontSize: 11, fontWeight: FontWeight.bold)),
             ],
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 5),
           SizedBox(
-            height: 12,
+            height: 10,
             child: CustomPaint(
               painter: BidirectionalPowerPainter(powerKw: powerKw),
               child: Container(),
@@ -919,10 +949,10 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
 
   Widget _buildFooter(double usedSoc) {
     return Container(
-      padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 20),
+      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
       decoration: BoxDecoration(
         color: const Color(0xFF0E1116),
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(14),
         border: Border.all(color: const Color(0xFF1C212C)),
       ),
       child: Row(
@@ -950,46 +980,46 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   }) {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
         gradient: const LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
           colors: [Color(0xFF13161C), Color(0xFF0E1015)],
         ),
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(16),
         border: Border.all(color: const Color(0xFF222733)),
       ),
       child: Stack(
         children: [
           Positioned(
-            left: -20,
-            top: -16,
-            bottom: -16,
-            child: Container(width: 6, color: barColor),
+            left: -16,
+            top: -12,
+            bottom: -12,
+            child: Container(width: 5, color: barColor),
           ),
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Text(label, style: const TextStyle(color: Color(0xFF90A4AE), fontSize: 14, fontWeight: FontWeight.w700)),
-              const SizedBox(height: 6),
+              Text(label, style: const TextStyle(color: Color(0xFF90A4AE), fontSize: 13, fontWeight: FontWeight.w700)),
+              const SizedBox(height: 4),
               Row(
                 crossAxisAlignment: CrossAxisAlignment.baseline,
                 textBaseline: TextBaseline.alphabetic,
                 children: [
-                  Text(value, style: TextStyle(color: valColor, fontSize: 38, fontWeight: FontWeight.w900)),
-                  const SizedBox(width: 6),
-                  Text(unit, style: const TextStyle(color: Color(0xFF78909C), fontSize: 16, fontWeight: FontWeight.w600)),
+                  Text(value, style: TextStyle(color: valColor, fontSize: 34, fontWeight: FontWeight.w900)),
+                  const SizedBox(width: 5),
+                  Text(unit, style: const TextStyle(color: Color(0xFF78909C), fontSize: 15, fontWeight: FontWeight.w600)),
                   if (subText != null) ...[
                     const Spacer(),
-                    Text(subText, style: const TextStyle(color: Color(0xFF78909C), fontSize: 15, fontWeight: FontWeight.w600)),
+                    Text(subText, style: const TextStyle(color: Color(0xFF78909C), fontSize: 14, fontWeight: FontWeight.w600)),
                   ],
                 ],
               ),
               if (bottomInfo != null) ...[
-                const SizedBox(height: 6),
-                Text(bottomInfo, style: const TextStyle(color: Color(0xFF00FF88), fontSize: 13, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 4),
+                Text(bottomInfo, style: const TextStyle(color: Color(0xFF00FF88), fontSize: 12, fontWeight: FontWeight.bold)),
               ]
             ],
           ),
@@ -1003,16 +1033,16 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(label, style: const TextStyle(color: Color(0xFF78909C), fontSize: 13, fontWeight: FontWeight.w600)),
-          const SizedBox(height: 4),
-          Text(value, style: TextStyle(color: valColor, fontSize: 22, fontWeight: FontWeight.w900)),
+          Text(label, style: const TextStyle(color: Color(0xFF78909C), fontSize: 12, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 3),
+          Text(value, style: TextStyle(color: valColor, fontSize: 19, fontWeight: FontWeight.w900)),
         ],
       ),
     );
   }
 
   Widget _buildSubDivider() {
-    return Container(width: 1.5, height: 32, color: const Color(0xFF1C212C));
+    return Container(width: 1.5, height: 28, color: const Color(0xFF1C212C));
   }
 }
 
@@ -1024,11 +1054,11 @@ class HtmlExactGaugePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final center = Offset(size.width / 2, size.height / 2);
-    final radius = (size.width - 30) / 2;
+    final radius = (size.width - 26) / 2;
 
     final bgPaint = Paint()
       ..color = const Color(0xFF161A22)
-      ..strokeWidth = 22
+      ..strokeWidth = 20
       ..style = PaintingStyle.stroke;
     canvas.drawCircle(center, radius, bgPaint);
 
@@ -1038,7 +1068,7 @@ class HtmlExactGaugePainter extends CustomPainter {
     final progressPaint = Paint()
       ..color = targetColor
       ..strokeCap = StrokeCap.round
-      ..strokeWidth = 22
+      ..strokeWidth = 20
       ..style = PaintingStyle.stroke;
 
     canvas.drawArc(rect, -math.pi / 2, sweepAngle, false, progressPaint);
@@ -1056,14 +1086,14 @@ class BidirectionalPowerPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final center = size.width / 2;
-    final rrect = RRect.fromRectAndRadius(Rect.fromLTWH(0, 0, size.width, size.height), const Radius.circular(6));
+    final rrect = RRect.fromRectAndRadius(Rect.fromLTWH(0, 0, size.width, size.height), const Radius.circular(5));
 
     final bgPaint = Paint()..color = const Color(0xFF161A22);
     canvas.drawRRect(rrect, bgPaint);
 
     final centerLinePaint = Paint()
       ..color = Colors.white38
-      ..strokeWidth = 2;
+      ..strokeWidth = 1.5;
     canvas.drawLine(Offset(center, 0), Offset(center, size.height), centerLinePaint);
 
     if (powerKw < 0) {
@@ -1074,7 +1104,7 @@ class BidirectionalPowerPainter extends CustomPainter {
           colors: [Color(0xFF00E5FF), Color(0xFF00FF88)],
         ).createShader(Rect.fromLTWH(center - barWidth, 0, barWidth, size.height));
       canvas.drawRRect(
-        RRect.fromRectAndRadius(Rect.fromLTWH(center - barWidth, 0, barWidth, size.height), const Radius.circular(6)),
+        RRect.fromRectAndRadius(Rect.fromLTWH(center - barWidth, 0, barWidth, size.height), const Radius.circular(5)),
         regenPaint,
       );
     } else if (powerKw > 0) {
@@ -1083,7 +1113,7 @@ class BidirectionalPowerPainter extends CustomPainter {
       Color barColor = powerKw > 35 ? const Color(0xFFFF3366) : const Color(0xFFFFB800);
       final powerPaint = Paint()..color = barColor;
       canvas.drawRRect(
-        RRect.fromRectAndRadius(Rect.fromLTWH(center, 0, barWidth, size.height), const Radius.circular(6)),
+        RRect.fromRectAndRadius(Rect.fromLTWH(center, 0, barWidth, size.height), const Radius.circular(5)),
         powerPaint,
       );
     }
