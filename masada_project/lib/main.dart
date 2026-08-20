@@ -46,6 +46,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   double packVolt = 320.0;
   double packCurr = 0.0;
   double speed = 0.0;
+  double motorRpm = 0.0;
   double temp = 20.0;
   double soh = 100.0;
   double maxCellVolt = 0.0;
@@ -76,14 +77,12 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     _startTimers();
     await _requestPermissions();
 
-    // 1. 앱 켜지고 정확히 10초 대기 후 최초 1회 연결 시도
     _initialDelayTimer = Timer(const Duration(seconds: 10), () {
       if (mounted && !isConnected && !isConnecting) {
         _connectToEvLogger();
       }
     });
 
-    // 2. 10초 이후 완전히 끊겨있을 때만 5초 주기로 재연결
     _reconnectLoopTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
       if (totalSeconds >= 10 && !isConnected && !isConnecting && mounted) {
         _connectToEvLogger();
@@ -125,7 +124,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
       historicalEfficiency = (historicalEfficiency * 0.8) + (instantEfficiency * 0.2);
     });
 
-    // 0.2초(5Hz) 단위로 UI 렌더링을 묶어 블루투스 부하 및 끊김 원천 차단
     _uiRefreshTimer = Timer.periodic(const Duration(milliseconds: 200), (timer) {
       if (!mounted) return;
       setState(() {
@@ -282,8 +280,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
         connectionStatusText = 'EvLogger 연결됨';
       });
 
-      // 자살 리셋 명령어(ATZ) 완전히 제거! 순수 수신 대기
-
       conn.input?.listen(
         _handleIncomingData,
         onDone: () {
@@ -316,9 +312,9 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     }
   }
 
-  // CAN 패킷 파서 (바이너리 + 아스키 전방위 지원)
+  // 완벽한 29비트 CAN ID 식별 엔진 (바이너리 + 아스키 동시 파싱)
   void _handleIncomingData(Uint8List chunk) {
-    // 1. 아스키 텍스트 파싱
+    // 1. 아스키 텍스트 라인 파싱
     String textChunk = String.fromCharCodes(chunk);
     _asciiBuffer += textChunk;
 
@@ -336,45 +332,53 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     _byteBuffer.addAll(chunk);
 
     while (_byteBuffer.length >= 12) {
-      // 0x0CFF7D03 (BMS_VCU_0) 탐색 (빅엔디언 / 리틀엔디언)
       bool is7D = false;
       bool is7E = false;
-      int headerSize = 0;
+      bool isMCU = false;
+      bool isMeter = false;
+      int headerSize = 4;
 
-      if (_byteBuffer[0] == 0x0C && _byteBuffer[1] == 0xFF && _byteBuffer[2] == 0x7D && _byteBuffer[3] == 0x03) {
+      // 4바이트 CAN ID 매칭 (0x8CFF7D03 / 0x0CFF7D03 / 0x2365553923)
+      if ((_byteBuffer[0] & 0x1F) == 0x0C && _byteBuffer[1] == 0xFF && _byteBuffer[2] == 0x7D && _byteBuffer[3] == 0x03) {
         is7D = true;
-        headerSize = (_byteBuffer.length > 4 && _byteBuffer[4] == 8) ? 5 : 4;
-      } else if (_byteBuffer[0] == 0x03 && _byteBuffer[1] == 0x7D && _byteBuffer[2] == 0xFF && _byteBuffer[3] == 0x0C) {
+      } else if (_byteBuffer[0] == 0x03 && _byteBuffer[1] == 0x7D && _byteBuffer[2] == 0xFF && (_byteBuffer[3] & 0x1F) == 0x0C) {
         is7D = true;
-        headerSize = 4;
-      } else if (_byteBuffer[0] == 0x0C && _byteBuffer[1] == 0xFF && _byteBuffer[2] == 0x7E && _byteBuffer[3] == 0x03) {
+      } else if ((_byteBuffer[0] & 0x1F) == 0x0C && _byteBuffer[1] == 0xFF && _byteBuffer[2] == 0x7E && _byteBuffer[3] == 0x03) {
         is7E = true;
-        headerSize = (_byteBuffer.length > 4 && _byteBuffer[4] == 8) ? 5 : 4;
-      } else if (_byteBuffer[0] == 0x03 && _byteBuffer[1] == 0x7E && _byteBuffer[2] == 0xFF && _byteBuffer[3] == 0x0C) {
+      } else if (_byteBuffer[0] == 0x03 && _byteBuffer[1] == 0x7E && _byteBuffer[2] == 0xFF && (_byteBuffer[3] & 0x1F) == 0x0C) {
         is7E = true;
-        headerSize = 4;
+      } else if ((_byteBuffer[0] & 0x1F) == 0x0C && _byteBuffer[1] == 0xFF && _byteBuffer[2] == 0x79 && _byteBuffer[3] == 0x02) {
+        isMCU = true;
+      } else if ((_byteBuffer[0] & 0x1F) == 0x18 && _byteBuffer[1] == 0xFF && _byteBuffer[2] == 0x01 && _byteBuffer[3] == 0xD5) {
+        isMeter = true;
       }
 
-      if (is7D) {
-        if (_byteBuffer.length >= headerSize + 8) {
-          List<int> data = _byteBuffer.sublist(headerSize, headerSize + 8);
-          _byteBuffer.removeRange(0, headerSize + 8);
-          _processBmsVcu0(data);
-          continue;
-        } else {
-          break;
-        }
+      if (_byteBuffer.length > 4 && _byteBuffer[4] == 8) {
+        headerSize = 5;
       }
 
-      if (is7E) {
-        if (_byteBuffer.length >= headerSize + 8) {
-          List<int> data = _byteBuffer.sublist(headerSize, headerSize + 8);
-          _byteBuffer.removeRange(0, headerSize + 8);
-          _processBmsVcu1(data);
-          continue;
-        } else {
-          break;
-        }
+      if (is7D && _byteBuffer.length >= headerSize + 8) {
+        _processBmsVcu0(_byteBuffer.sublist(headerSize, headerSize + 8));
+        _byteBuffer.removeRange(0, headerSize + 8);
+        continue;
+      }
+
+      if (is7E && _byteBuffer.length >= headerSize + 8) {
+        _processBmsVcu1(_byteBuffer.sublist(headerSize, headerSize + 8));
+        _byteBuffer.removeRange(0, headerSize + 8);
+        continue;
+      }
+
+      if (isMCU && _byteBuffer.length >= headerSize + 8) {
+        _processMcuVcu0(_byteBuffer.sublist(headerSize, headerSize + 8));
+        _byteBuffer.removeRange(0, headerSize + 8);
+        continue;
+      }
+
+      if (isMeter && _byteBuffer.length >= headerSize + 8) {
+        _processMeterVcu1(_byteBuffer.sublist(headerSize, headerSize + 8));
+        _byteBuffer.removeRange(0, headerSize + 8);
+        continue;
       }
 
       _byteBuffer.removeAt(0);
@@ -387,16 +391,18 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     if (line.isEmpty) return;
     String clean = line.replaceAll(' ', '').toUpperCase();
 
-    if (clean.contains('CFF7D03') || clean.contains('18F001D0') || clean.contains('7D03')) {
+    if (clean.contains('7D03') || clean.contains('8CFF7D03') || clean.contains('0CFF7D03')) {
       List<int> bytes = _extractHexBytes(clean);
-      if (bytes.length >= 8) {
-        _processBmsVcu0(bytes.sublist(bytes.length - 8));
-      }
-    } else if (clean.contains('CFF7E03') || clean.contains('18F002D0') || clean.contains('7E03')) {
+      if (bytes.length >= 8) _processBmsVcu0(bytes.sublist(bytes.length - 8));
+    } else if (clean.contains('7E03') || clean.contains('8CFF7E03') || clean.contains('0CFF7E03')) {
       List<int> bytes = _extractHexBytes(clean);
-      if (bytes.length >= 8) {
-        _processBmsVcu1(bytes.sublist(bytes.length - 8));
-      }
+      if (bytes.length >= 8) _processBmsVcu1(bytes.sublist(bytes.length - 8));
+    } else if (clean.contains('7902') || clean.contains('8CFF7902')) {
+      List<int> bytes = _extractHexBytes(clean);
+      if (bytes.length >= 8) _processMcuVcu0(bytes.sublist(bytes.length - 8));
+    } else if (clean.contains('01D5') || clean.contains('98FF01D5')) {
+      List<int> bytes = _extractHexBytes(clean);
+      if (bytes.length >= 8) _processMeterVcu1(bytes.sublist(bytes.length - 8));
     }
   }
 
@@ -471,6 +477,19 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     } else {
       chargeKw = 0.0;
     }
+  }
+
+  // BO_ 2365552898 MCU_VCU_0 : 모터 실제 속도 (RPM)
+  void _processMcuVcu0(List<int> d) {
+    if (d.length < 8) return;
+    int rawSpd = d[4] | (d[5] << 8);
+    motorRpm = (rawSpd - 12000).toDouble().clamp(0.0, 12000.0);
+  }
+
+  // BO_ 2566839509 Meter_VCU_1 : 계기판 실제 차속 (km/h)
+  void _processMeterVcu1(List<int> d) {
+    if (d.length < 8) return;
+    speed = d[0].toDouble().clamp(0.0, 150.0);
   }
 
   @override
