@@ -35,7 +35,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   bool isConnecting = false;
   bool isConnected = false;
 
-  // CAN 순정 데이터 변수 (evkmc 역공학 공식 기반)
+  // CAN 순정 데이터 변수
   double soc = 0.0;
   double packVolt = 0.0;
   double packCurr = 0.0;
@@ -49,22 +49,36 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   double tripDistance = 0.0;
   double historicalEfficiency = 5.3;
 
-  // 5초 평균 전비 큐 (실시간 색상 제어)
+  // 5초 평균 전비 큐
   final Queue<double> efficiencyQueue = Queue<double>();
   double smoothedEfficiency = 5.5;
 
   Timer? _tripTimer;
+  Timer? _autoReconnectTimer;
 
   @override
   void initState() {
     super.initState();
-    _requestPermissions();
+    _initApp();
+  }
+
+  Future<void> _initApp() async {
+    await _requestPermissions();
     _startTimers();
+    // 앱 켜지자마자 즉시 자동 연결 시도
+    _connectToEvLogger();
+    // 연결 끊김 대비 5초마다 자동 재연결 감시
+    _autoReconnectTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
+      if (!isConnected && !isConnecting) {
+        _connectToEvLogger();
+      }
+    });
   }
 
   @override
   void dispose() {
     _tripTimer?.cancel();
+    _autoReconnectTimer?.cancel();
     connection?.dispose();
     super.dispose();
   }
@@ -78,11 +92,10 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
           tripDistance += (speed / 3600.0);
         }
 
-        // 순간 전비 계산 & 5초 이동평균 버퍼
         double instantEfficiency = 5.5;
         double powerKw = (packVolt * packCurr) / 1000.0;
         if (powerKw < 0) {
-          instantEfficiency = 9.9; // 회생제동 충전
+          instantEfficiency = 9.9;
         } else if (powerKw > 0.5 && speed > 1.0) {
           instantEfficiency = (speed / powerKw).clamp(0.0, 15.0);
         }
@@ -91,7 +104,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
         if (efficiencyQueue.length > 5) efficiencyQueue.removeFirst();
         smoothedEfficiency = efficiencyQueue.reduce((a, b) => a + b) / efficiencyQueue.length;
 
-        // 누적 전비 (EMA)
         historicalEfficiency = (historicalEfficiency * 0.8) + (instantEfficiency * 0.2);
       });
     });
@@ -104,13 +116,12 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
   }
 
-  // 5단계 실시간 전비 컬러
   Color _getEfficiencyColor(double eff) {
-    if (eff >= 7.0) return const Color(0xFF29B6F6); // 🔵 스카이블루 (초고효율)
-    if (eff >= 5.5) return const Color(0xFF00E676); // 🟢 네온그린 (고효율)
-    if (eff >= 4.5) return const Color(0xFFFFEE58); // 🟡 옐로우 (양호)
-    if (eff >= 4.0) return const Color(0xFFFFA726); // 🟠 오렌지 (보통)
-    return const Color(0xFFFF5252);                 // 🔴 레드 (급가속/부하)
+    if (eff >= 7.0) return const Color(0xFF29B6F6);
+    if (eff >= 5.5) return const Color(0xFF00E676);
+    if (eff >= 4.5) return const Color(0xFFFFEE58);
+    if (eff >= 4.0) return const Color(0xFFFFA726);
+    return const Color(0xFFFF5252);
   }
 
   Future<void> _requestPermissions() async {
@@ -122,9 +133,11 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     ].request();
   }
 
-  // 블루투스 네이티브 SPP 소켓 연결
+  // 자동 연결 메인 함수
   void _connectToEvLogger() async {
+    if (isConnected || isConnecting) return;
     setState(() => isConnecting = true);
+
     try {
       List<BluetoothDevice> devices = await FlutterBluetoothSerial.instance.getBondedDevices();
       BluetoothDevice? targetDevice;
@@ -134,12 +147,20 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
           break;
         }
       }
+
       if (targetDevice != null) {
         _startConnection(targetDevice);
       } else {
-        FlutterBluetoothSerial.instance.startDiscovery().listen((r) {
+        StreamSubscription? discoverySub;
+        discoverySub = FlutterBluetoothSerial.instance.startDiscovery().listen((r) {
           if (r.device.name?.contains('EvLogger') == true) {
+            discoverySub?.cancel();
             _startConnection(r.device);
+          }
+        });
+        Future.delayed(const Duration(seconds: 4), () {
+          if (!isConnected && isConnecting) {
+            setState(() => isConnecting = false);
           }
         });
       }
@@ -157,14 +178,20 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
         isConnecting = false;
       });
       conn.input?.listen(_onDataReceived).onDone(() {
-        setState(() => isConnected = false);
+        setState(() {
+          isConnected = false;
+          connection = null;
+        });
       });
     } catch (e) {
-      setState(() => isConnecting = false);
+      setState(() {
+        isConnected = false;
+        isConnecting = false;
+        connection = null;
+      });
     }
   }
 
-  // evkmc 앱 순정 CAN 패킷 파싱 로직
   void _onDataReceived(Uint8List rawBytes) {
     if (rawBytes.length >= 8) {
       ByteData view = ByteData.sublistView(rawBytes);
@@ -199,11 +226,8 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
           padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
           child: Column(
             children: [
-              // 헤더 바 (브랜드명, 테마 선택 드롭다운, 블루투스 연결 버튼)
               _buildHeader(dynamicColor),
               const SizedBox(height: 6),
-
-              // 메인 바디 (선택된 테마 렌더링)
               Expanded(
                 child: _buildThemeBody(
                   dynamicColor: dynamicColor,
@@ -213,10 +237,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
                   powerKw: powerKw,
                 ),
               ),
-
               const SizedBox(height: 6),
-
-              // 하단 공통 트립 바
               _buildFooter(usedSoc),
             ],
           ),
@@ -249,7 +270,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
         ),
         Row(
           children: [
-            // 테마 선택기
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8),
               decoration: BoxDecoration(
@@ -274,7 +294,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
               ),
             ),
             const SizedBox(width: 8),
-            // 블루투스 버튼
             InkWell(
               onTap: isConnected ? () => connection?.finish() : _connectToEvLogger,
               borderRadius: BorderRadius.circular(20),
@@ -303,7 +322,7 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
                     ),
                     const SizedBox(width: 8),
                     Text(
-                      isConnected ? 'EvLogger 연결됨' : (isConnecting ? '연결 중...' : '블루투스 연결'),
+                      isConnected ? 'EvLogger 연결됨' : (isConnecting ? '자동 연결 중...' : '블루투스 연결'),
                       style: TextStyle(
                         color: isConnected ? const Color(0xFF00E676) : const Color(0xFFFF5252),
                         fontSize: 12,
@@ -339,7 +358,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     }
   }
 
-  // 1. 오리지널 네온 UI
   Widget _buildOriginalNeonBody(Color dynamicColor, double ecoRange, double bmsRange, double chargePercentPerHour) {
     return Row(
       children: [
@@ -399,7 +417,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     );
   }
 
-  // 2. 테슬라 스타일
   Widget _buildTeslaBody(Color dynamicColor, double ecoRange, double powerKw) {
     return Column(
       children: [
@@ -444,7 +461,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     );
   }
 
-  // 3. BMW M 스타일
   Widget _buildBmwBody(Color dynamicColor, double ecoRange, double powerKw) {
     return Row(
       children: [
@@ -491,7 +507,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
     );
   }
 
-  // 4. BYD 오션 스타일
   Widget _buildBydBody(Color dynamicColor, double ecoRange, double bmsRange, double chargePercentPerHour) {
     return Row(
       children: [
@@ -624,7 +639,6 @@ class _MasadaDashboardAppState extends State<MasadaDashboardApp> {
   }
 }
 
-// 상단 시작 원형 게이지
 class HtmlExactGaugePainter extends CustomPainter {
   final double soc;
   final Color targetColor;
@@ -635,14 +649,12 @@ class HtmlExactGaugePainter extends CustomPainter {
     final center = Offset(size.width / 2, size.height / 2);
     final radius = (size.width - 24) / 2;
 
-    // 배경 트랙
     final bgPaint = Paint()
       ..color = const Color(0xFF161A22)
       ..strokeWidth = 18
       ..style = PaintingStyle.stroke;
     canvas.drawCircle(center, radius, bgPaint);
 
-    // 활성 게이지 (상단 12시 방향 시작)
     final sweepAngle = 2 * math.pi * (soc / 100.0).clamp(0.0, 1.0);
     final rect = Rect.fromCircle(center: center, radius: radius);
 
