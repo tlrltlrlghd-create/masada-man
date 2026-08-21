@@ -670,13 +670,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  // 💡 1 & 2. 좌측 패널 (전비 점수 색상 적용: 점수판 + BMS 주행거리)
+  // 💡 1. 좌측 패널 (실시간 주행 효율 타이틀만 깔끔하게 표시)
   Widget _buildLeftPanel() {
     Color effThemeColor = _getEfficiencyColor(_efficiencyScore);
 
     return Column(
       children: [
-        // 1. 실시간 주행 효율 점수판
+        // 실시간 주행 효율 점수판
         Expanded(
           child: Container(
             width: double.infinity,
@@ -690,15 +690,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    const Text("실시간 주행 효율 (3분)", style: TextStyle(color: Colors.white70, fontSize: 11)),
-                    Text(
-                      "${_recent3MinEfficiency.toStringAsFixed(1)} km/kWh",
-                      style: TextStyle(color: effThemeColor, fontSize: 10, fontWeight: FontWeight.bold),
-                    ),
-                  ],
+                const Text(
+                  "실시간 주행 효율 (3분)",
+                  style: TextStyle(color: Colors.white70, fontSize: 11),
                 ),
                 const SizedBox(height: 4),
                 Row(
@@ -718,7 +712,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ),
         const SizedBox(height: 12),
-        // 2. BMS 주행가능거리 (전비 점수 색상 연동)
+        // BMS 주행가능거리
         Expanded(
           child: _buildCard(
             title: "BMS 주행가능거리 (3분 전비)",
@@ -731,7 +725,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  // 💡 3. 중앙 배터리 게이지 (전비 점수 색상 연동)
+  // 💡 2. 중앙 배터리 게이지 (BATTERY 삭제 -> 큼지막한 전비 km/kWh로 교체)
   Widget _buildCenterSocGauge() {
     Color effThemeColor = _getEfficiencyColor(_efficiencyScore);
 
@@ -752,14 +746,39 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 value: _soc / 100.0,
                 strokeWidth: 14,
                 backgroundColor: const Color(0xFF222A35),
-                valueColor: AlwaysStoppedAnimation<Color>(effThemeColor), // 🎨 전비 색상 연동
+                valueColor: AlwaysStoppedAnimation<Color>(effThemeColor),
               ),
             ),
             Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text("BATTERY", style: TextStyle(color: Colors.white54, fontSize: 11, letterSpacing: 1.5)),
+                // ⚡ 상단: BATTERY 제거 후 큼지막한 실시간 전비 배치
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  textBaseline: TextBaseline.alphabetic,
+                  children: [
+                    Text(
+                      _recent3MinEfficiency.toStringAsFixed(1),
+                      style: TextStyle(
+                        color: effThemeColor,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(width: 3),
+                    Text(
+                      "km/kWh",
+                      style: TextStyle(
+                        color: effThemeColor.withOpacity(0.85),
+                        fontSize: 10,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
                 const SizedBox(height: 2),
+                // 하단: 메인 배터리 잔량 (%)
                 Row(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.baseline,
@@ -767,9 +786,20 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   children: [
                     Text(
                       _soc.toStringAsFixed(1),
-                      style: TextStyle(color: effThemeColor, fontSize: 34, fontWeight: FontWeight.bold), // 🎨 전비 색상 연동
+                      style: TextStyle(
+                        color: effThemeColor,
+                        fontSize: 34,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
-                    Text("%", style: TextStyle(color: effThemeColor, fontSize: 16, fontWeight: FontWeight.bold)),
+                    Text(
+                      "%",
+                      style: TextStyle(
+                        color: effThemeColor,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
                   ],
                 ),
               ],
