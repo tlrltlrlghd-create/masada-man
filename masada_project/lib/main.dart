@@ -21,16 +21,13 @@ class MasadaEvApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark().copyWith(scaffoldBackgroundColor: const Color(0xFF0D0F12)),
+      title: 'MASADA VAN EV MONITOR',
+      theme: ThemeData.dark().copyWith(
+        scaffoldBackgroundColor: const Color(0xFF0D0F12),
+      ),
       home: const DashboardScreen(),
     );
   }
-}
-
-class _DrivingSample {
-  final double powerKw;
-  final double estimatedSpeedKmh;
-  _DrivingSample(this.powerKw, this.estimatedSpeedKmh);
 }
 
 class DashboardScreen extends StatefulWidget {
@@ -40,31 +37,39 @@ class DashboardScreen extends StatefulWidget {
   State<DashboardScreen> createState() => _DashboardScreenState();
 }
 
+class _DrivingSample {
+  final double powerKw;
+  final double estimatedSpeedKmh;
+  _DrivingSample(this.powerKw, this.estimatedSpeedKmh);
+}
+
 class _DashboardScreenState extends State<DashboardScreen> {
   bool _isCampingMode = false;
   static const double _batteryTotalKwh = 38.7;
 
+  // 블루투스 통신
   BluetoothConnection? _connection;
   bool _isConnected = false;
   bool _isConnecting = false;
   final List<int> _rxBuffer = [];
   Timer? _autoConnectTimer;
-  Timer? _heartbeatTimer; // 📍 모듈 연결 유지용 하트비트 타이머
 
-  // 데이터
-  double _soc = 87.0;
-  double _voltage = 318.0;
-  double _current = 1.0;
-  double _powerKw = 0.3;
-  double _chargePowerKw = 0.0;
-  double _batteryTemp = 30.0;
-  int _soh = 94;
-  double _bmsDistance = 185.2;
+  // 실시간 전기차 데이터 (초기값 0)
+  double _soc = 0.0;            
+  double _voltage = 0.0;       
+  double _current = 0.0;         
+  double _powerKw = 0.0;         
+  double _chargePowerKw = 0.0;   
+  double _batteryTemp = 0.0;    
+  int _soh = 0;                 
+  double _bmsDistance = 0.0;   
   
+  // 3분 전비 및 효율 점수
   final List<_DrivingSample> _recent3MinSamples = [];
   double _recent3MinEfficiency = 5.7;
   int _efficiencyScore = 50;
   
+  // 누적 통계
   double _accumulatedRegenKwh = 0.0;
   double _driveEnergyKwh = 0.0;
   double _hvacEnergyKwh = 0.0;
@@ -75,8 +80,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   void initState() {
     super.initState();
     _startDrivingTimer();
-    
-    // 10초마다 자동 연결 시도 (안정적 루프)
+    _connectToLogger();
     _autoConnectTimer = Timer.periodic(const Duration(seconds: 10), (timer) {
       if (!_isConnected && !_isConnecting) {
         _connectToLogger();
@@ -87,139 +91,222 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   void dispose() {
     _autoConnectTimer?.cancel();
-    _heartbeatTimer?.cancel(); // 📍 타이머 해제
     _drivingTimer?.cancel();
     _connection?.dispose();
     super.dispose();
   }
 
-  // 📍 연결 유지용 하트비트(Keep-Alive) 전송 로직
-  void _startHeartbeat() {
-    _heartbeatTimer?.cancel();
-    // 1초마다 모듈에 데이터 전송 (모듈이 잠들거나 소켓을 끊는 것 방지)
-    _heartbeatTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (_isConnected && _connection != null) {
-        try {
-          // 데이터 헤더(AA 55) 기반의 더미 요청 데이터 (순정앱들이 주로 쓰는 방식)
-          // 만약 모듈이 데이터 요청 명령을 받아야만 데이터를 준다면 이 바이트를 쏩니다.
-          _connection!.output.add(Uint8List.fromList([0xAA, 0x55, 0x00, 0x00, 0x00, 0x00]));
-          _connection!.output.allSent;
-        } catch (e) {
-          debugPrint("Heartbeat 전송 실패: $e");
-        }
-      }
-    });
+  void _resetData() {
+    if (mounted) {
+      setState(() {
+        _soc = 0.0;
+        _voltage = 0.0;
+        _current = 0.0;
+        _powerKw = 0.0;
+        _chargePowerKw = 0.0;
+        _batteryTemp = 0.0;
+        _soh = 0;
+        _bmsDistance = 0.0;
+      });
+    }
   }
 
-  // 연결 시도 시 기존 소켓을 확실히 닫는 연결 엔진
   Future<void> _connectToLogger() async {
     if (_isConnected || _isConnecting) return;
-    setState(() => _isConnecting = true);
+
+    if (mounted) setState(() => _isConnecting = true);
 
     try {
-      // 1. 기존 연결 강제 종료 (순정앱 충돌 방지 핵심)
-      if (_connection != null) {
-        try {
-          await _connection!.close();
-          _connection!.dispose();
-        } catch (_) {}
-        _connection = null;
-        await Future.delayed(const Duration(milliseconds: 500));
-      }
-
       List<BluetoothDevice> devices = await FlutterBluetoothSerial.instance.getBondedDevices();
       BluetoothDevice? targetDevice;
 
       for (var d in devices) {
         String name = (d.name ?? '').toUpperCase();
-        if (name.contains('EV') || name.contains('OBD') || name.contains('MASADA') || name.contains('BT')) {
+        if (name.contains('EV') || name.contains('LOGGER') || name.contains('OBD') || name.contains('MASADA')) {
           targetDevice = d;
           break;
         }
       }
-      targetDevice ??= devices.isNotEmpty ? devices.first : null;
+
+      if (targetDevice == null && devices.isNotEmpty) {
+        targetDevice = devices.first;
+      }
 
       if (targetDevice != null) {
         _connection = await BluetoothConnection.toAddress(targetDevice.address);
-        setState(() {
-          _isConnected = true;
-          _isConnecting = false;
-        });
+        
+        if (mounted) {
+          setState(() {
+            _isConnected = true;
+            _isConnecting = false;
+          });
+        }
 
-        // 📍 연결 성공 즉시 하트비트(연결 유지) 시작
-        _startHeartbeat();
-
-        _connection!.input!.listen((Uint8List data) {
-          _processData(data);
-        }, onDone: () {
-          setState(() => _isConnected = false);
-          _heartbeatTimer?.cancel(); // 연결 끊기면 하트비트 중지
-        }, onError: (e) {
-          setState(() => _isConnected = false);
-          _heartbeatTimer?.cancel();
-        });
+        _connection!.input!.listen(
+          (Uint8List data) {
+            _processData(data);
+          },
+          onDone: () {
+            _resetData();
+            if (mounted) {
+              setState(() {
+                _isConnected = false;
+                _isConnecting = false;
+              });
+            }
+          },
+          onError: (error) {
+            _resetData();
+            if (mounted) {
+              setState(() {
+                _isConnected = false;
+                _isConnecting = false;
+              });
+            }
+          },
+          cancelOnError: false,
+        );
       } else {
-        setState(() => _isConnecting = false);
+        if (mounted) setState(() => _isConnecting = false);
       }
     } catch (e) {
-      setState(() => _isConnecting = false);
-      _heartbeatTimer?.cancel();
+      if (mounted) {
+        setState(() {
+          _isConnected = false;
+          _isConnecting = false;
+        });
+      }
     }
   }
 
-  // --- 데이터 처리 ---
+  // 💡 [순정 리버스 복원] 패킷 파싱 및 버퍼 동기화
   void _processData(Uint8List data) {
     _rxBuffer.addAll(data);
 
-    while (_rxBuffer.length >= 8) {
+    while (_rxBuffer.length >= 12) {
       int headerIndex = -1;
+      int packetType = 0; // 1: AA 55, 2: 7F 7F, 3: 24 45 ($E)
+
       for (int i = 0; i < _rxBuffer.length - 1; i++) {
-        if ((_rxBuffer[i] == 0xAA && _rxBuffer[i + 1] == 0x55) ||
-            (_rxBuffer[i] == 0x7F && _rxBuffer[i + 1] == 0x7F) ||
-            (_rxBuffer[i] == 0x24 && _rxBuffer[i + 1] == 0x45)) {
+        if (_rxBuffer[i] == 0xAA && _rxBuffer[i + 1] == 0x55) {
           headerIndex = i;
+          packetType = 1;
+          break;
+        } else if (_rxBuffer[i] == 0x7F && _rxBuffer[i + 1] == 0x7F) {
+          headerIndex = i;
+          packetType = 2;
+          break;
+        } else if (_rxBuffer[i] == 0x24 && _rxBuffer[i + 1] == 0x45) {
+          headerIndex = i;
+          packetType = 3;
           break;
         }
       }
 
       if (headerIndex == -1) {
-        if (_rxBuffer.length > 1) _rxBuffer.removeRange(0, _rxBuffer.length - 1);
+        if (_rxBuffer.length > 1) {
+          _rxBuffer.removeRange(0, _rxBuffer.length - 1);
+        }
         break;
       }
 
-      if (headerIndex > 0) _rxBuffer.removeRange(0, headerIndex);
-      if (_rxBuffer.length < 16) break;
+      if (headerIndex > 0) {
+        _rxBuffer.removeRange(0, headerIndex);
+      }
 
-      _parseEvPacket(_rxBuffer.sublist(0, 16));
-      _rxBuffer.removeRange(0, 16);
+      if (_rxBuffer.length < 14) break;
+
+      _parseEvPacket(_rxBuffer.sublist(0, 14), packetType);
+      _rxBuffer.removeRange(0, 14);
     }
   }
 
-  void _parseEvPacket(List<int> packet) {
+  // 💡 [순정 리버스 복원] BMS 실제 데이터 디코딩
+  void _parseEvPacket(List<int> p, int type) {
     try {
-      if (packet.length > 2 && packet[2] > 0 && packet[2] <= 100) _soc = packet[2].toDouble();
-      if (packet.length > 4) {
-        int rawVolt = (packet[3] << 8) | packet[4];
-        if (rawVolt > 1000 && rawVolt < 5000) _voltage = rawVolt / 10.0;
+      double parsedSoc = _soc;
+      double parsedVolt = _voltage;
+      double parsedCurr = _current;
+      double parsedTemp = _batteryTemp;
+      int parsedSoh = _soh;
+
+      if (type == 1) {
+        // [타입 1: 0xAA 0x55 표준 BMS 프레임]
+        // p[0]=AA, p[1]=55
+        // p[2]=전압H, p[3]=전압L (0.1V 단위)
+        // p[4]=전류H, p[5]=전류L (offset 3276.8 or 30000)
+        // p[6]=SOC (0~100%) 또는 0.1%
+        // p[7]=온도 (offset -40)
+        // p[8]=SOH (0~100%)
+        
+        int rawVolt = (p[2] << 8) | p[3];
+        if (rawVolt > 500 && rawVolt < 5000) {
+          parsedVolt = rawVolt / 10.0;
+        }
+
+        int rawCurr = (p[4] << 8) | p[5];
+        if (rawCurr >= 0 && rawCurr <= 65535) {
+          parsedCurr = (rawCurr - 32768) / 10.0;
+          if (parsedCurr.abs() > 400) {
+            parsedCurr = (rawCurr - 30000) / 10.0;
+          }
+        }
+
+        int rawSoc = p[6];
+        if (rawSoc > 0 && rawSoc <= 100) {
+          parsedSoc = rawSoc.toDouble();
+        } else if (p.length > 9 && p[9] > 0 && p[9] <= 100) {
+          parsedSoc = p[9].toDouble();
+        }
+
+        int rawTemp = p[7] - 40;
+        if (rawTemp >= -40 && rawTemp <= 120) {
+          parsedTemp = rawTemp.toDouble();
+        }
+
+        if (p[8] >= 50 && p[8] <= 100) {
+          parsedSoh = p[8];
+        }
+      } else if (type == 2 || type == 3) {
+        // [타입 2/3: 0x7F 0x7F 또는 $E OBD 스트림]
+        int rawSoc = p[2];
+        if (rawSoc > 0 && rawSoc <= 100) {
+          parsedSoc = rawSoc.toDouble();
+        }
+
+        int rawVolt = (p[3] << 8) | p[4];
+        if (rawVolt > 1000 && rawVolt < 5000) {
+          parsedVolt = rawVolt / 10.0;
+        }
+
+        int rawCurr = (p[5] << 8) | p[6];
+        parsedCurr = (rawCurr - 32768) / 10.0;
+
+        int rawTemp = p[7] - 40;
+        if (rawTemp >= -30 && rawTemp <= 100) {
+          parsedTemp = rawTemp.toDouble();
+        }
+
+        if (p[8] >= 50 && p[8] <= 100) {
+          parsedSoh = p[8];
+        }
       }
-      if (packet.length > 6) {
-        int rawCurr = (packet[5] << 8) | packet[6];
-        double parsedCurr = (rawCurr - 32768) / 10.0;
-        if (parsedCurr.abs() < 500) _current = parsedCurr;
-      }
-      if (packet.length > 7) {
-        int rawTemp = packet[7] - 40;
-        if (rawTemp >= -30 && rawTemp <= 100) _batteryTemp = rawTemp.toDouble();
-      }
-      if (packet.length > 8 && packet[8] > 50 && packet[8] <= 100) {
-        _soh = packet[8];
-      } else if (_soh == 0) {
-        _soh = 94;
-      }
+
+      _soc = parsedSoc;
+      _voltage = parsedVolt;
+      _current = parsedCurr;
+      _batteryTemp = parsedTemp;
+      _soh = parsedSoh == 0 ? 94 : parsedSoh;
 
       double calcPower = (_voltage * _current) / 1000.0;
       _powerKw = calcPower;
-      if (_current < 0) _chargePowerKw = calcPower.abs(); else _chargePowerKw = 0.0;
+
+      if (_current < 0) {
+        _chargePowerKw = calcPower.abs();
+      } else {
+        _chargePowerKw = 0.0;
+      }
+
       if (mounted) setState(() {});
     } catch (_) {}
   }
@@ -229,12 +316,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (mounted) {
         setState(() {
           _drivingSeconds++;
-          if (!_isCampingMode) {
-            if (_current < -0.5 && _chargePowerKw > 0.1) _accumulatedRegenKwh += (_chargePowerKw / 3600.0);
-            if (_powerKw > 1.0) _driveEnergyKwh += (_powerKw / 3600.0);
-            else if (_powerKw > 0.05) _hvacEnergyKwh += (_powerKw / 3600.0);
+          
+          if (!_isCampingMode && _isConnected) {
+            if (_current < -0.5 && _chargePowerKw > 0.1) {
+              _accumulatedRegenKwh += (_chargePowerKw / 3600.0);
+            }
+            if (_powerKw > 1.0) {
+              _driveEnergyKwh += (_powerKw / 3600.0);
+            } else if (_powerKw > 0.05) {
+              _hvacEnergyKwh += (_powerKw / 3600.0);
+            }
+            _update3MinEfficiency();
           }
-          if (!_isCampingMode && _isConnected) _update3MinEfficiency();
         });
       }
     });
@@ -242,29 +335,36 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   void _update3MinEfficiency() {
     double speed = 0.0;
-    if (_powerKw > 1.0) speed = (_powerKw * 4.5).clamp(10.0, 100.0);
+    if (_powerKw > 1.0) {
+      speed = (_powerKw * 4.5).clamp(10.0, 100.0);
+    }
 
     _recent3MinSamples.add(_DrivingSample(_powerKw, speed));
-    if (_recent3MinSamples.length > 180) _recent3MinSamples.removeAt(0);
+    if (_recent3MinSamples.length > 180) {
+      _recent3MinSamples.removeAt(0);
+    }
 
     if (_recent3MinSamples.length >= 10) {
       double totalNetKwh = 0.0;
       double totalDistanceKm = 0.0;
+
       for (var s in _recent3MinSamples) {
         totalNetKwh += (s.powerKw / 3600.0);
         totalDistanceKm += (s.estimatedSpeedKmh / 3600.0);
       }
+
       if (totalNetKwh > 0.005 && totalDistanceKm > 0.01) {
-        _recent3MinEfficiency = (totalDistanceKm / totalNetKwh).clamp(2.0, 10.0);
+        double calcEff = totalDistanceKm / totalNetKwh;
+        _recent3MinEfficiency = calcEff.clamp(2.0, 10.0);
       }
     }
+
     double rawScore = ((_recent3MinEfficiency - 3.7) / (7.7 - 3.7)) * 100.0;
     _efficiencyScore = rawScore.clamp(0.0, 100.0).round();
+
     double currentRemainKwh = (_batteryTotalKwh * (_soh / 100.0)) * (_soc / 100.0);
     _bmsDistance = double.parse((currentRemainKwh * _recent3MinEfficiency).toStringAsFixed(1));
   }
-
-  // --- UI 영역 (초대형 스케일 및 모든 기능 포함) ---
 
   Color _getEfficiencyColor(int score) {
     if (score >= 80) return const Color(0xFF00E676);
@@ -490,7 +590,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  // 💡 메인 3분할 비율 (28 : 44 : 28)
   Widget _buildStandardDashboard() {
     return Row(
       children: [
@@ -690,7 +789,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               width: 275,
               height: 275,
               child: CircularProgressIndicator(
-                value: _soc / 100.0,
+                value: (_soc / 100.0).clamp(0.0, 1.0),
                 strokeWidth: 22,
                 backgroundColor: const Color(0xFF222A35),
                 valueColor: AlwaysStoppedAnimation<Color>(effThemeColor),
