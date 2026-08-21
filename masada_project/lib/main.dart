@@ -70,8 +70,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
   double _recent3MinEfficiency = 5.7; // 기본값 5.7 km/kWh
   int _efficiencyScore = 50;          // 0~100점
   
-  // 누적 회생제동 회수량
+  // 누적 회생제동 회수량 및 소모 에너지 분리 통계
   double _accumulatedRegenKwh = 0.0;
+  double _driveEnergyKwh = 0.0;     // 순수 주행 모터 소모 에너지
+  double _hvacEnergyKwh = 0.0;      // 공조/차내 대기 소모 에너지
 
   // 운행 시간 타이머
   int _drivingSeconds = 0;
@@ -102,12 +104,22 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (mounted) {
         setState(() {
           _drivingSeconds++;
-          // 회생제동 중일 때 1초 단위 적분 누적
-          if (_current < -0.5 && _chargePowerKw > 0.1 && !_isCampingMode) {
-            _accumulatedRegenKwh += (_chargePowerKw / 3600.0);
+          
+          if (!_isCampingMode) {
+            // 1. 회생제동 중일 때 1초 단위 적분 누적
+            if (_current < -0.5 && _chargePowerKw > 0.1) {
+              _accumulatedRegenKwh += (_chargePowerKw / 3600.0);
+            }
+
+            // 2. 에너지 소모 요인 분리 누적 (1kW 초과는 주행, 1kW 이하는 공조/대기)
+            if (_powerKw > 1.0) {
+              _driveEnergyKwh += (_powerKw / 3600.0);
+            } else if (_powerKw > 0.05) {
+              _hvacEnergyKwh += (_powerKw / 3600.0);
+            }
           }
 
-          // 3분 실시간 전비 및 점수 계산
+          // 3. 3분 실시간 전비 및 점수 계산
           if (!_isCampingMode && _isConnected) {
             _update3MinEfficiency();
           }
@@ -172,23 +184,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
   // 🌡️ 배터리 온도별 안전 가속 한계치(kW) 및 색상 결정
   // ==========================================
   double _getSafePowerLimitKw(double temp) {
-    if (temp < 0) return 15.0;       // 영하: 15kW 제한
-    if (temp < 10) return 25.0;      // 0~10도: 25kW 제한
-    if (temp < 20) return 40.0;      // 10~20도: 40kW 제한
-    return 50.0;                     // 20도 이상: 50kW 정상 풀파워
+    if (temp < 0) return 15.0;
+    if (temp < 10) return 25.0;
+    if (temp < 20) return 40.0;
+    return 50.0;
   }
 
   Color _getPowerGaugeColor(double powerKw, double temp) {
     if (powerKw < 0) {
-      return const Color(0xFFFF9100); // 회생제동 (오렌지)
+      return const Color(0xFFFF9100);
     }
     double limit = _getSafePowerLimitKw(temp);
     if (powerKw > limit) {
-      return const Color(0xFFFF5252); // 과가속 경고 (빨강)
+      return const Color(0xFFFF5252);
     } else if (powerKw > limit * 0.75) {
-      return const Color(0xFFFFB300); // 주의 구간 (주황)
+      return const Color(0xFFFFB300);
     }
-    return const Color(0xFF00E676);   // 정상 안전 주행 (네온 그린)
+    return const Color(0xFF00E676);
   }
 
   // ==========================================
@@ -670,13 +682,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  // 💡 1. 좌측 패널 (실시간 주행 효율 타이틀만 깔끔하게 표시)
   Widget _buildLeftPanel() {
     Color effThemeColor = _getEfficiencyColor(_efficiencyScore);
 
     return Column(
       children: [
-        // 실시간 주행 효율 점수판
+        // 1. 실시간 주행 효율 점수판
         Expanded(
           child: Container(
             width: double.infinity,
@@ -712,7 +723,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ),
         const SizedBox(height: 12),
-        // BMS 주행가능거리
+        // 2. BMS 주행가능거리
         Expanded(
           child: _buildCard(
             title: "BMS 주행가능거리 (3분 전비)",
@@ -725,7 +736,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  // 💡 2. 중앙 배터리 게이지 (BATTERY 삭제 -> 큼지막한 전비 km/kWh로 교체)
   Widget _buildCenterSocGauge() {
     Color effThemeColor = _getEfficiencyColor(_efficiencyScore);
 
@@ -752,7 +762,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
             Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                // ⚡ 상단: BATTERY 제거 후 큼지막한 실시간 전비 배치
                 Row(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.baseline,
@@ -778,7 +787,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   ],
                 ),
                 const SizedBox(height: 2),
-                // 하단: 메인 배터리 잔량 (%)
                 Row(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.baseline,
@@ -810,6 +818,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  // 💡 수정된 우측 패널 (실시간 충전량 + 테슬라 스타일 소모 분석 & 회수 전력/거리 이득)
   Widget _buildRightPanel() {
     bool isChargingOrRegen = _chargePowerKw > 0.1;
     bool isFastCharge = _chargePowerKw > 10.0;
@@ -830,8 +839,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
       }
     }
 
+    // 에너지 소모 비율 계산 (기본값: 주행 85%, 공조 15%)
+    double totalConsumed = _driveEnergyKwh + _hvacEnergyKwh;
+    int drivePct = totalConsumed > 0.01 ? ((_driveEnergyKwh / totalConsumed) * 100).round() : 85;
+    int hvacPct = 100 - drivePct;
+
+    // 회생 회수 실시간 전력(W) & 거리 이득(km)
+    double regenWatts = _current < 0 ? (_voltage * _current.abs()) : 0.0;
+    double gainedKm = _accumulatedRegenKwh * _recent3MinEfficiency;
+
     return Column(
       children: [
+        // 1. 상단: 실시간 충전량 카드
         Expanded(
           child: Container(
             width: double.infinity,
@@ -883,13 +902,60 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ),
         const SizedBox(height: 12),
+        // 2. 하단: 주행% vs 공조% + 회수량 W & 거리 이득 카드
         Expanded(
-          child: _buildCard(
-            title: "실시간 배터리 전력",
-            valueText: "${(_voltage * _current).abs().toStringAsFixed(0)}",
-            unitText: "W",
-            valueColor: Colors.white,
-            subText: "${_voltage.toStringAsFixed(0)}V / ${_current.abs().toStringAsFixed(1)}A",
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF13171D),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: regenWatts > 100 ? const Color(0xFFFF9100).withOpacity(0.6) : const Color(0xFF222A35),
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                // 상단: 주행 % vs 공조 %
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Row(
+                      children: [
+                        const Text("주행 ", style: TextStyle(color: Colors.white70, fontSize: 11)),
+                        Text("$drivePct%", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 11, fontWeight: FontWeight.bold)),
+                        const Text(" · 공조 ", style: TextStyle(color: Colors.white70, fontSize: 11)),
+                        Text("$hvacPct%", style: const TextStyle(color: Color(0xFFFFB300), fontSize: 11, fontWeight: FontWeight.bold)),
+                      ],
+                    ),
+                    Text(
+                      "+${gainedKm.toStringAsFixed(1)}km 이득",
+                      style: const TextStyle(color: Color(0xFF00E676), fontSize: 10, fontWeight: FontWeight.bold),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                // 메인: 회수량 W (회생제동 시 주황색 점등)
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  textBaseline: TextBaseline.alphabetic,
+                  children: [
+                    Text(
+                      regenWatts.toStringAsFixed(0),
+                      style: TextStyle(
+                        color: regenWatts > 50 ? const Color(0xFFFF9100) : Colors.white,
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    const Text("W (회수)", style: TextStyle(color: Colors.white54, fontSize: 12)),
+                  ],
+                ),
+              ],
+            ),
           ),
         ),
       ],
