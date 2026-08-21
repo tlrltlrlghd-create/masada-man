@@ -37,6 +37,7 @@ class DashboardScreen extends StatefulWidget {
   State<DashboardScreen> createState() => _DashboardScreenState();
 }
 
+// 1초 단위 전비 샘플링 데이터 모델
 class _DrivingSample {
   final double powerKw;
   final double estimatedSpeedKmh;
@@ -83,7 +84,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     super.initState();
     _startDrivingTimer();
     _connectToLogger();
-    // 10초마다 자동 연결 시도
+    // [핵심] 새벽에 가장 연결 잘 되던 10초 주기 자동 재연결
     _autoConnectTimer = Timer.periodic(const Duration(seconds: 10), (timer) {
       if (!_isConnected && !_isConnecting) {
         _connectToLogger();
@@ -106,10 +107,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
           _drivingSeconds++;
           
           if (!_isCampingMode) {
+            // 회생제동 누적
             if (_current < -0.5 && _chargePowerKw > 0.1) {
               _accumulatedRegenKwh += (_chargePowerKw / 3600.0);
             }
 
+            // 소모량 분류 누적 (주행 vs 공조)
             if (_powerKw > 1.0) {
               _driveEnergyKwh += (_powerKw / 3600.0);
             } else if (_powerKw > 0.05) {
@@ -271,7 +274,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return "$h시간 $m분";
   }
 
-  // 🔄 가장 안정적이었던 1:1 직결 블루투스 연결 엔진
+  // 🔄 [새벽 원본 블루투스 연결 엔진]
   Future<void> _connectToLogger() async {
     if (_isConnected || _isConnecting) return;
 
@@ -729,7 +732,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  // 💡 중앙 게이지 초대형화 (280px x 280px, Stroke 22px, 폰트 64pt)
+  // 💡 중앙 게이지 초대형화 (275px x 275px, Stroke 22px, 폰트 64pt)
   Widget _buildCenterSocGauge() {
     Color effThemeColor = _getEfficiencyColor(_efficiencyScore);
 
@@ -842,6 +845,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     return Column(
       children: [
+        // 1. 실시간 충전량
         Expanded(
           child: Container(
             width: double.infinity,
@@ -893,6 +897,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ),
         const SizedBox(height: 10),
+        // 2. 주행% 공조% 및 회생 정보
         Expanded(
           child: Container(
             width: double.infinity,
@@ -1083,7 +1088,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  // 💡 하단 카드 (글자 크기 15~16pt 스케일업)
+  // 💡 하단 5개 카드 (글자 크기 16pt 스케일업)
   Widget _buildBottomStatusBar() {
     Map<String, dynamic> tempGrade = _getBatteryTempGrade();
     double totalConsumedKwh = _driveEnergyKwh + _hvacEnergyKwh;
@@ -1101,7 +1106,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 16, fontWeight: FontWeight.bold),
           ),
         ),
-        // 2. 이번 운행 소모량
+        // 2. 이번 운행 소모량 (0.0 kWh + 소모 %)
         _buildBottomCard(
           title: "이번 운행 소모량",
           child: Row(
@@ -1119,7 +1124,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ],
           ),
         ),
-        // 3. 실시간 소모 전력
+        // 3. 실시간 소모 전력 (W)
         _buildBottomCard(
           title: "실시간 소모 전력",
           child: Text(
