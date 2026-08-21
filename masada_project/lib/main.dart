@@ -70,10 +70,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
   double _recent3MinEfficiency = 5.7; // 기본값 5.7 km/kWh
   int _efficiencyScore = 50;          // 0~100점
   
-  // 누적 회생제동 회수량 및 소모 에너지 분리 통계
+  // 누적 회생제동 회수량 및 소모 에너지 통계
   double _accumulatedRegenKwh = 0.0;
-  double _driveEnergyKwh = 0.0;     // 순수 주행 모터 소모 에너지
-  double _hvacEnergyKwh = 0.0;      // 공조/차내 대기 소모 에너지
+  double _driveEnergyKwh = 0.0;     // 순수 주행 모터 소모 에너지 (kWh)
+  double _hvacEnergyKwh = 0.0;      // 공조/차내 대기 소모 에너지 (kWh)
 
   // 운행 시간 타이머
   int _drivingSeconds = 0;
@@ -818,7 +818,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  // 💡 수정된 우측 패널 (실시간 충전량 + 테슬라 스타일 소모 분석 & 회수 전력/거리 이득)
   Widget _buildRightPanel() {
     bool isChargingOrRegen = _chargePowerKw > 0.1;
     bool isFastCharge = _chargePowerKw > 10.0;
@@ -839,13 +838,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
       }
     }
 
-    // 에너지 소모 비율 계산 (기본값: 주행 85%, 공조 15%)
     double totalConsumed = _driveEnergyKwh + _hvacEnergyKwh;
     int drivePct = totalConsumed > 0.01 ? ((_driveEnergyKwh / totalConsumed) * 100).round() : 85;
     int hvacPct = 100 - drivePct;
 
-    // 회생 회수 실시간 전력(W) & 거리 이득(km)
-    double regenWatts = _current < 0 ? (_voltage * _current.abs()) : 0.0;
+    double regenKw = _current < 0 ? _chargePowerKw : 0.0;
+    double regenPct = (_accumulatedRegenKwh / _batteryTotalKwh) * 100.0;
     double gainedKm = _accumulatedRegenKwh * _recent3MinEfficiency;
 
     return Column(
@@ -902,7 +900,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ),
         const SizedBox(height: 12),
-        // 2. 하단: 주행% vs 공조% + 회수량 W & 거리 이득 카드
+        // 2. 하단 (3시 방향): 상단(회생/충전/이득) + 메인(주행% 공조%)
         Expanded(
           child: Container(
             width: double.infinity,
@@ -911,47 +909,55 @@ class _DashboardScreenState extends State<DashboardScreen> {
               color: const Color(0xFF13171D),
               borderRadius: BorderRadius.circular(14),
               border: Border.all(
-                color: regenWatts > 100 ? const Color(0xFFFF9100).withOpacity(0.6) : const Color(0xFF222A35),
+                color: regenKw > 0.5 ? const Color(0xFFFF9100).withOpacity(0.6) : const Color(0xFF222A35),
               ),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                // 상단: 주행 % vs 공조 %
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      "회생 ${regenKw.toStringAsFixed(1)}kW",
+                      style: TextStyle(
+                        color: regenKw > 0.1 ? const Color(0xFFFF9100) : Colors.white54,
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    Text(
+                      "+${regenPct.toStringAsFixed(1)}%",
+                      style: const TextStyle(color: Color(0xFF00E676), fontSize: 10, fontWeight: FontWeight.bold),
+                    ),
+                    Text(
+                      "+${gainedKm.toStringAsFixed(1)}km 이득",
+                      style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 10, fontWeight: FontWeight.bold),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     Row(
+                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                      textBaseline: TextBaseline.alphabetic,
                       children: [
-                        const Text("주행 ", style: TextStyle(color: Colors.white70, fontSize: 11)),
-                        Text("$drivePct%", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 11, fontWeight: FontWeight.bold)),
-                        const Text(" · 공조 ", style: TextStyle(color: Colors.white70, fontSize: 11)),
-                        Text("$hvacPct%", style: const TextStyle(color: Color(0xFFFFB300), fontSize: 11, fontWeight: FontWeight.bold)),
+                        const Text("주행 ", style: TextStyle(color: Colors.white70, fontSize: 12)),
+                        Text(
+                          "$drivePct%",
+                          style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 22, fontWeight: FontWeight.bold),
+                        ),
+                        const SizedBox(width: 8),
+                        const Text("· 공조 ", style: TextStyle(color: Colors.white70, fontSize: 12)),
+                        Text(
+                          "$hvacPct%",
+                          style: const TextStyle(color: Color(0xFFFFB300), fontSize: 22, fontWeight: FontWeight.bold),
+                        ),
                       ],
                     ),
-                    Text(
-                      "+${gainedKm.toStringAsFixed(1)}km 이득",
-                      style: const TextStyle(color: Color(0xFF00E676), fontSize: 10, fontWeight: FontWeight.bold),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 4),
-                // 메인: 회수량 W (회생제동 시 주황색 점등)
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.baseline,
-                  textBaseline: TextBaseline.alphabetic,
-                  children: [
-                    Text(
-                      regenWatts.toStringAsFixed(0),
-                      style: TextStyle(
-                        color: regenWatts > 50 ? const Color(0xFFFF9100) : Colors.white,
-                        fontSize: 24,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(width: 4),
-                    const Text("W (회수)", style: TextStyle(color: Colors.white54, fontSize: 12)),
                   ],
                 ),
               ],
@@ -1004,9 +1010,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  // ==========================================
-  // ⚡ 배터리 온도별 동적 한계선(눈금) & 가속 색상 반영 파워바
-  // ==========================================
   Widget _buildPowerBar() {
     double normalized = ((_powerKw + 50) / 100).clamp(0.0, 1.0);
     double safeLimitKw = _getSafePowerLimitKw(_batteryTemp);
@@ -1090,9 +1093,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  // 💡 수정된 하단 상태 바 (2번째 카드: 소모 kWh + 소모 % 표시)
   Widget _buildBottomStatusBar() {
-    double regenPct = (_accumulatedRegenKwh / _batteryTotalKwh) * 100.0;
     Map<String, dynamic> tempGrade = _getBatteryTempGrade();
+    double totalConsumedKwh = _driveEnergyKwh + _hvacEnergyKwh;
+    // 이번 운행 소모 비율 (%)
+    double consumedPct = (totalConsumedKwh / _batteryTotalKwh) * 100.0;
 
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -1105,20 +1111,20 @@ class _DashboardScreenState extends State<DashboardScreen> {
             style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 12, fontWeight: FontWeight.bold),
           ),
         ),
-        // 2. 회생제동 누적 회수량
+        // 2. 📍 수정: 이번 운행 배터리 소모량 (kWh) & 소모 비율 (-%)
         _buildBottomCard(
-          title: "회생 회수량 (REGEN)",
+          title: "이번 운행 소모량",
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                "${_accumulatedRegenKwh.toStringAsFixed(2)} kWh",
-                style: const TextStyle(color: Color(0xFFFF9100), fontSize: 12, fontWeight: FontWeight.bold),
+                "${totalConsumedKwh.toStringAsFixed(2)} kWh",
+                style: const TextStyle(color: Color(0xFFFFB300), fontSize: 12, fontWeight: FontWeight.bold),
               ),
               const SizedBox(width: 4),
               Text(
-                "(+${regenPct.toStringAsFixed(1)}%)",
-                style: const TextStyle(color: Color(0xFF00E676), fontSize: 10, fontWeight: FontWeight.bold),
+                "(-${consumedPct.toStringAsFixed(1)}%)",
+                style: const TextStyle(color: Color(0xFFFF5252), fontSize: 10, fontWeight: FontWeight.bold),
               ),
             ],
           ),
