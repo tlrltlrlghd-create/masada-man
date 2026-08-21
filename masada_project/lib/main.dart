@@ -32,8 +32,8 @@ class MasadaEvApp extends StatelessWidget {
 
 class _DrivingSample {
   final double powerKw;
-  final double estimatedSpeedKmh;
-  _DrivingSample(this.powerKw, this.estimatedSpeedKmh);
+  final double realSpeedKmh;
+  _DrivingSample(this.powerKw, this.realSpeedKmh);
 }
 
 class DashboardScreen extends StatefulWidget {
@@ -67,6 +67,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
   int _soh = 94;
   double _bmsDistance = 0.0;
 
+  // 배터리 팩 수분/침수 알림 상태 플래그 (BMS_WtrAlm)
+  bool _isWaterAlarm = false;
+
+  // 실제 계기판 수신 차속 및 거리 데이터 (DBC: Meter_VCU_1)
+  double _realVehicleSpeedKmh = 0.0;
+  double _accumulatedRealTripKm = 0.0;
+  double _lastTripOdoKm = -1.0;
+
+  // 기어 위치 및 자동 캠핑모드 타이머 (N: 0x00, D: 0x01, R: 0x02)
+  String _currentGear = "D";
+  int _neutralDurationSeconds = 0;
+
   // 셀 전압 및 밸런싱 데이터
   int _cellMaxMv = 3320;
   int _cellMinMv = 3305;
@@ -81,7 +93,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
   double _accumulatedRegenKwh = 0.0;
   double _driveEnergyKwh = 0.0;
   double _hvacEnergyKwh = 0.0;
-  double _totalDrivenDistanceKm = 0.0;
   int _drivingSeconds = 0;
   int _loadSampleCount = 0;
   double _accumulatedLoadPct = 0.0;
@@ -122,6 +133,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
         _recent3MinEfficiency = 0.0;
         _efficiencyScore = 0;
         _cellDeltaMv = 0;
+        _realVehicleSpeedKmh = 0.0;
+        _neutralDurationSeconds = 0;
+        _isWaterAlarm = false;
       });
     }
   }
@@ -155,7 +169,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
       List<BluetoothDevice> devices = await FlutterBluetoothSerial.instance.getBondedDevices();
       BluetoothDevice? targetDevice;
 
-      // 1순위: F0D6 매칭
       for (var d in devices) {
         String name = (d.name ?? '').toUpperCase();
         if (name.contains(_targetLoggerId)) {
@@ -164,7 +177,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
         }
       }
 
-      // 2순위: 일반 매칭
       if (targetDevice == null) {
         for (var d in devices) {
           String name = (d.name ?? '').toUpperCase();
@@ -212,7 +224,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
-  // 💡 [CAN 버퍼 동기화 엔진]
   void _processData(Uint8List data) {
     _rxBuffer.addAll(data);
 
@@ -241,38 +252,34 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
       if (_rxBuffer.length < 12) break;
 
-      // 12바이트 프레임 안전 파싱
       _parseDbcFrame(_rxBuffer.sublist(0, 12));
       _rxBuffer.removeRange(0, 12);
     }
   }
 
-  // 💡 [공식 DBC 1:1 수식 매핑]
   void _parseDbcFrame(List<int> p) {
     try {
-      // 1. BMS_VCU_0 (0x0CFF7D03): SOC (Factor 0.5)
       int rawSoc = p[3];
       if (rawSoc == 0 || rawSoc > 200) {
         rawSoc = p[6];
       }
       if (rawSoc > 0 && rawSoc <= 200) {
-        double calcSoc = rawSoc * 0.5; // 138 * 0.5 = 69.0%
+        double calcSoc = rawSoc * 0.5;
         if (calcSoc >= 1.0 && calcSoc <= 100.0) {
           _soc = calcSoc;
         }
       }
 
-      // 2. BMS_VCU_1 (0x0CFF7E03): 전압, 전류, 온도, SOH
       int rawVolt = (p[4] << 8) | p[5];
       if (rawVolt >= 200 && rawVolt <= 500) {
-        _voltage = rawVolt.toDouble(); // 318 V
+        _voltage = rawVolt.toDouble();
       } else if (rawVolt >= 2000 && rawVolt <= 5000) {
         _voltage = rawVolt / 10.0;
       }
 
       int rawCurr = (p[6] << 8) | p[7];
       if (rawCurr >= 0 && rawCurr <= 65535) {
-        double calcCurr = (rawCurr - 1000).toDouble(); // 0A = Raw 1000
+        double calcCurr = (rawCurr - 1000).toDouble();
         if (calcCurr.abs() > 300.0) {
           calcCurr = (rawCurr - 32000) / 10.0;
         }
@@ -283,7 +290,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
       int rawTemp = p[8];
       if (rawTemp >= 40 && rawTemp <= 140) {
-        _batteryTemp = (rawTemp - 40).toDouble(); // 76 - 40 = 36°C
+        _batteryTemp = (rawTemp - 40).toDouble();
       } else if (rawTemp >= 0 && rawTemp <= 65) {
         _batteryTemp = rawTemp.toDouble();
       }
@@ -293,7 +300,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
         _soh = rawSoh;
       }
 
-      // 셀 전압 최고/최저 및 편차 산출
+      if ((p[2] == 0x7E || p[2] == 0x03) && p.length > 10) {
+        _isWaterAlarm = (p[10] & 0x08) != 0;
+      }
+
       int rawCellMax = (p[10] << 8) | p[11];
       if (rawCellMax >= 2000 && rawCellMax <= 4500) {
         _cellMaxMv = rawCellMax;
@@ -302,6 +312,36 @@ class _DashboardScreenState extends State<DashboardScreen> {
       }
       _cellMinMv = _cellMaxMv - 15;
       _cellDeltaMv = (_cellMaxMv - _cellMinMv).clamp(0, 300);
+
+      if (p[2] == 0x25 || p[2] == 0x95) {
+        int rawSpeed = (p[4] << 8) | p[5];
+        if (rawSpeed >= 0 && rawSpeed <= 1600) {
+          _realVehicleSpeedKmh = rawSpeed * 0.1;
+        }
+
+        int rawTrip = (p[6] << 16) | (p[7] << 8) | p[8];
+        double currentTripKm = rawTrip * 0.1;
+        if (_lastTripOdoKm >= 0 && currentTripKm >= _lastTripOdoKm) {
+          _accumulatedRealTripKm += (currentTripKm - _lastTripOdoKm);
+        }
+        _lastTripOdoKm = currentTripKm;
+      }
+
+      if (p[2] == 0x33 || p[2] == 0x48) {
+        int rawGear = p[3] & 0x0F;
+        if (rawGear == 0x00) {
+          _currentGear = "N";
+        } else if (rawGear == 0x01) {
+          _currentGear = "D";
+        } else if (rawGear == 0x02) {
+          _currentGear = "R";
+        }
+      }
+
+      if (_currentGear == "D" && _isCampingMode) {
+        _isCampingMode = false;
+        _neutralDurationSeconds = 0;
+      }
 
       double calcPower = (_voltage * _current) / 1000.0;
       if (calcPower.abs() > 70.0) {
@@ -324,19 +364,38 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (mounted) {
         setState(() {
           _drivingSeconds++;
+
+          if (_currentGear == "N" || (_realVehicleSpeedKmh < 0.5 && _powerKw.abs() < 0.5 && _chargePowerKw < 0.5)) {
+            _neutralDurationSeconds++;
+            if (_neutralDurationSeconds >= 60 && !_isCampingMode) {
+              _isCampingMode = true;
+            }
+          } else {
+            _neutralDurationSeconds = 0;
+            if (_isCampingMode && _realVehicleSpeedKmh > 1.0) {
+              _isCampingMode = false;
+            }
+          }
+
           if (!_isCampingMode && _isConnected) {
             if (_current < -0.5 && _chargePowerKw > 0.1) {
               _accumulatedRegenKwh += (_chargePowerKw / 3600.0);
             }
             if (_powerKw > 1.0) {
               _driveEnergyKwh += (_powerKw / 3600.0);
-              // 부하율 누적 (정격 60kW 기준)
               double liveLoad = (_powerKw / 60.0 * 100.0).clamp(0.0, 100.0);
               _accumulatedLoadPct += liveLoad;
               _loadSampleCount++;
             } else if (_powerKw > 0.05) {
               _hvacEnergyKwh += (_powerKw / 3600.0);
             }
+
+            if (_realVehicleSpeedKmh <= 0.0 && _powerKw > 1.0) {
+              _accumulatedRealTripKm += ((_powerKw * 4.5).clamp(10.0, 100.0) / 3600.0);
+            } else if (_realVehicleSpeedKmh > 0.0) {
+              _accumulatedRealTripKm += (_realVehicleSpeedKmh / 3600.0);
+            }
+
             _update3MinEfficiency();
           }
         });
@@ -345,10 +404,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   void _update3MinEfficiency() {
-    double speed = 0.0;
-    if (_powerKw > 1.0) {
-      speed = (_powerKw * 4.5).clamp(10.0, 100.0);
-    }
+    double speed = _realVehicleSpeedKmh > 0.5 ? _realVehicleSpeedKmh : (_powerKw > 1.0 ? (_powerKw * 4.5).clamp(10.0, 100.0) : 0.0);
 
     _recent3MinSamples.add(_DrivingSample(_powerKw, speed));
     if (_recent3MinSamples.length > 180) {
@@ -360,7 +416,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       double totalDistanceKm = 0.0;
       for (var s in _recent3MinSamples) {
         totalNetKwh += (s.powerKw / 3600.0);
-        totalDistanceKm += (s.estimatedSpeedKmh / 3600.0);
+        totalDistanceKm += (s.realSpeedKmh / 3600.0);
       }
       if (totalNetKwh > 0.005 && totalDistanceKm > 0.01) {
         _recent3MinEfficiency = (totalDistanceKm / totalNetKwh).clamp(2.0, 10.0);
@@ -372,12 +428,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     double currentRemainKwh = (_batteryTotalKwh * (_soh / 100.0)) * (_soc / 100.0);
     _bmsDistance = double.parse((currentRemainKwh * _recent3MinEfficiency).toStringAsFixed(1));
-
-    // 운행 추산 거리
-    _totalDrivenDistanceKm = (_driveEnergyKwh * _recent3MinEfficiency);
   }
 
-  // 💡 [80%/100% 다단계 감발 반영 잔여 시간 계산 엔진]
   String _calculateTimeToSoc(double targetSoc) {
     if (_chargePowerKw < 0.5) return "--";
 
@@ -479,12 +531,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return "(+${rate.toStringAsFixed(1)} %/h)";
   }
 
-  // 💡 [카니발 vs 마사다 유류비 및 절감액 3열 세부 계산]
   Map<String, int> _calculateDetailedFuelCosts() {
-    if (_totalDrivenDistanceKm <= 0.05) {
+    if (_accumulatedRealTripKm <= 0.05) {
       return {'carnival': 0, 'masada': 0, 'saved': 0};
     }
-    double carnivalCost = _totalDrivenDistanceKm * (1800.0 / 7.0);
+    double carnivalCost = _accumulatedRealTripKm * (1800.0 / 7.0);
     double totalConsumedKwh = _driveEnergyKwh + _hvacEnergyKwh;
     double masadaCost = totalConsumedKwh * 300.0;
     double saved = carnivalCost - masadaCost;
@@ -496,7 +547,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     };
   }
 
-  // 💡 [셀 밸런싱 상태 및 색상 판정]
   Map<String, dynamic> _getCellBalanceStatus() {
     int d = _cellDeltaMv;
     if (d <= 25) return {'status': '최적(S)', 'desc': '완벽 밸런싱', 'color': const Color(0xFF00E676)};
@@ -505,7 +555,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return {'status': '점검(C)', 'desc': '셀 편차 과다', 'color': const Color(0xFFFF5252)};
   }
 
-  // 💡 [출력 부하율 4단계 글자 및 색상 판정]
   Map<String, dynamic> _getLoadGrade(double avgLoadPct) {
     if (avgLoadPct <= 30.0) {
       return {'text': '최적', 'color': const Color(0xFF00E676)};
@@ -548,14 +597,51 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        Text(
-          _isCampingMode ? "MASADA VAN  CAMPING MODE" : "MASADA VAN  EV MONITOR",
-          style: TextStyle(
-            color: _isCampingMode ? const Color(0xFFFFB300) : const Color(0xFF00E676),
-            fontSize: 19,
-            fontWeight: FontWeight.bold,
-            letterSpacing: 1.2,
-          ),
+        Row(
+          children: [
+            if (_isWaterAlarm)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.redAccent.withOpacity(0.25),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.redAccent, width: 1.2),
+                ),
+                child: const Row(
+                  children: [
+                    Icon(Icons.warning_amber_rounded, color: Colors.redAccent, size: 18),
+                    SizedBox(width: 6),
+                    Text(
+                      "⚠️ 배터리 팩 수분 감지 주의 (점검 권장)",
+                      style: TextStyle(color: Colors.redAccent, fontSize: 14, fontWeight: FontWeight.bold),
+                    ),
+                  ],
+                ),
+              )
+            else
+              Text(
+                _isCampingMode ? "MASADA VAN  CAMPING MODE" : "MASADA VAN  EV MONITOR",
+                style: TextStyle(
+                  color: _isCampingMode ? const Color(0xFFFFB300) : const Color(0xFF00E676),
+                  fontSize: 19,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 1.2,
+                ),
+              ),
+            const SizedBox(width: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: _currentGear == "N" ? const Color(0xFFFFB300).withOpacity(0.2) : const Color(0xFF1E242C),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: _currentGear == "N" ? const Color(0xFFFFB300) : Colors.white24),
+              ),
+              child: Text(
+                "기어: $_currentGear",
+                style: TextStyle(color: _currentGear == "N" ? const Color(0xFFFFB300) : Colors.white70, fontSize: 12, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
         ),
         Row(
           children: [
@@ -563,6 +649,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               onTap: () {
                 setState(() {
                   _isCampingMode = !_isCampingMode;
+                  _neutralDurationSeconds = 0;
                 });
               },
               child: Container(
@@ -584,7 +671,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     ),
                     const SizedBox(width: 5),
                     Text(
-                      "캠핑 모드",
+                      _isCampingMode ? "캠핑 모드 (ON)" : "캠핑 모드",
                       style: TextStyle(
                         color: _isCampingMode ? const Color(0xFFFFB300) : Colors.white70,
                         fontSize: 13,
@@ -770,14 +857,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  // 💡 [좌측 패널: 상단에 유류비 절감 비교 카드 배치]
   Widget _buildLeftPanel() {
     Color effThemeColor = _getEfficiencyColor(_efficiencyScore);
     Map<String, int> fuelCosts = _calculateDetailedFuelCosts();
 
     return Column(
       children: [
-        // 1. 유류비 절감 비교 카드 (자리 이동)
         Expanded(
           child: Container(
             width: double.infinity,
@@ -799,7 +884,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   ],
                 ),
                 const SizedBox(height: 4),
-                // 메인 절감액
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.baseline,
                   textBaseline: TextBaseline.alphabetic,
@@ -810,7 +894,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   ],
                 ),
                 const SizedBox(height: 6),
-                // 카니발 vs 마사다 소모 비용
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
@@ -823,7 +906,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ),
         const SizedBox(height: 10),
-        // 2. BMS 주행가능거리
         Expanded(
           child: _buildCard(
             title: "BMS 주행가능거리 (3분 전비)",
@@ -1051,11 +1133,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  // 💡 [회생제동 한계 도달 및 풋브레이크 유도 뱃지: 실차 실측 SOC 90.5% 반영]
   Widget _buildPowerBar() {
     double normalized = ((_powerKw + 50) / 100).clamp(0.0, 1.0);
     double safeLimitKw = _getSafePowerLimitKw(_batteryTemp);
     double limitNormalized = ((safeLimitKw + 50) / 100).clamp(0.0, 1.0);
     Color dynamicBarColor = _getPowerGaugeColor(_powerKw, _batteryTemp);
+
+    // 💡 실차 실측 커트라인 반영: SOC 90.5% 이상 또는 배터리 온도 5°C 미만 시 회생제동 제한 점등
+    bool isRegenLimited = (_soc >= 90.5) || (_batteryTemp < 5.0);
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
@@ -1069,7 +1155,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text("◀ 회생제동 (REGEN)", style: TextStyle(color: Color(0xFFFF9100), fontSize: 13, fontWeight: FontWeight.bold)),
+              Row(
+                children: [
+                  const Text("◀ 회생제동 (REGEN)", style: TextStyle(color: Color(0xFFFF9100), fontSize: 13, fontWeight: FontWeight.bold)),
+                  if (isRegenLimited) ...[
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                      decoration: BoxDecoration(
+                        color: Colors.redAccent.withOpacity(0.2),
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(color: Colors.redAccent, width: 0.8),
+                      ),
+                      child: const Text("⚠️ 회생제한 (풋브레이크 권장)", style: TextStyle(color: Colors.redAccent, fontSize: 11, fontWeight: FontWeight.bold)),
+                    ),
+                  ],
+                ],
+              ),
               Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -1113,7 +1215,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  // 💡 [기존 5개 하단 카드 100% 유지]
   Widget _buildBottomStatusBar() {
     Map<String, dynamic> tempGrade = _getBatteryTempGrade();
     double totalConsumedKwh = _driveEnergyKwh + _hvacEnergyKwh;
@@ -1174,7 +1275,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  // 💡 [새로 추가된 핵심 3대 지표 확장 바: 중앙에 실시간 주행 효율 점수 배치]
   Widget _buildExtendedAdvancedBar() {
     double avgLoadPct = _loadSampleCount > 0 ? (_accumulatedLoadPct / _loadSampleCount) : 0.0;
     Map<String, dynamic> cellBal = _getCellBalanceStatus();
@@ -1184,7 +1284,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        // 1. (이번 주행) 평균 부하율 + 4단계 컬러 뱃지
         Expanded(
           flex: 35,
           child: _buildExtendedCard(
@@ -1212,7 +1311,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ),
         const SizedBox(width: 6),
-        // 2. 실시간 주행 효율 점수 (자리 이동)
         Expanded(
           flex: 32,
           child: _buildExtendedCard(
@@ -1240,7 +1338,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ),
         const SizedBox(width: 6),
-        // 3. 셀 밸런싱 편차 게이지
         Expanded(
           flex: 33,
           child: _buildExtendedCard(
