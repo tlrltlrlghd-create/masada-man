@@ -241,13 +241,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
   // 💡 [공식 DBC 1:1 수식 매핑]
   void _parseDbcFrame(List<int> p) {
     try {
-      int subId = p[2]; // 프레임 식별자 또는 CAN 서브타입
-
       // 1. BMS_VCU_0 (0x0CFF7D03): SOC (Factor 0.5)
-      // 또는 기본 통합 프레임의 SOC 위치
       int rawSoc = p[3];
       if (rawSoc == 0 || rawSoc > 200) {
-        rawSoc = p[6]; // 보조 위치 검사
+        rawSoc = p[6];
       }
       if (rawSoc > 0 && rawSoc <= 200) {
         double calcSoc = rawSoc * 0.5; // 138 * 0.5 = 69.0%
@@ -257,27 +254,24 @@ class _DashboardScreenState extends State<DashboardScreen> {
       }
 
       // 2. BMS_VCU_1 (0x0CFF7E03): 전압, 전류, 온도, SOH
-      // 전압 (Bit 16, 16bit, Factor 1.0 -> 318V = 318 또는 0.1V 단위 3180)
       int rawVolt = (p[4] << 8) | p[5];
       if (rawVolt >= 200 && rawVolt <= 500) {
         _voltage = rawVolt.toDouble(); // 318 V
       } else if (rawVolt >= 2000 && rawVolt <= 5000) {
-        _voltage = rawVolt / 10.0; // 318.0 V
+        _voltage = rawVolt / 10.0;
       }
 
-      // 전류 (Bit 32, 16bit, Factor 1.0, Offset -1000)
       int rawCurr = (p[6] << 8) | p[7];
       if (rawCurr >= 0 && rawCurr <= 65535) {
         double calcCurr = (rawCurr - 1000).toDouble(); // 0A = Raw 1000
         if (calcCurr.abs() > 300.0) {
-          calcCurr = (rawCurr - 32000) / 10.0; // 대체 0.1A 오프셋 검증
+          calcCurr = (rawCurr - 32000) / 10.0;
         }
         if (calcCurr.abs() <= 300.0) {
           _current = calcCurr;
         }
       }
 
-      // 배터리 최고온도 (BMS_HTemp: Bit 48, 8bit, Offset -40)
       int rawTemp = p[8];
       if (rawTemp >= 40 && rawTemp <= 140) {
         _batteryTemp = (rawTemp - 40).toDouble(); // 76 - 40 = 36°C
@@ -285,13 +279,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
         _batteryTemp = rawTemp.toDouble();
       }
 
-      // SOH (Bit 8, 8bit, 1.0)
       int rawSoh = p[9];
       if (rawSoh >= 50 && rawSoh <= 100) {
         _soh = rawSoh;
       }
 
-      // 실시간 전력 계산 및 비정상 노이즈 가드
       double calcPower = (_voltage * _current) / 1000.0;
       if (calcPower.abs() > 70.0) {
         calcPower = 0.0;
@@ -357,6 +349,46 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     double currentRemainKwh = (_batteryTotalKwh * (_soh / 100.0)) * (_soc / 100.0);
     _bmsDistance = double.parse((currentRemainKwh * _recent3MinEfficiency).toStringAsFixed(1));
+  }
+
+  // 💡 [80%/100% 다단계 감발(80~90%, 90~100%) 반영 잔여 시간 계산 엔진]
+  String _calculateTimeToSoc(double targetSoc) {
+    if (_chargePowerKw < 0.5) return "--";
+
+    if (targetSoc == 80.0) {
+      if (_soc >= 80.0) return "완료";
+      double neededKwh = _batteryTotalKwh * ((80.0 - _soc) / 100.0);
+      int minutes = ((neededKwh / _chargePowerKw) * 60).round();
+      return "${minutes}분";
+    } else if (targetSoc == 100.0) {
+      if (_soc >= 99.5) return "완료";
+
+      double totalHours = 0.0;
+
+      // 1) 현재 ~ 80% 구간: 실시간 급속 출력 적용
+      if (_soc < 80.0) {
+        double kwhTo80 = _batteryTotalKwh * ((80.0 - _soc) / 100.0);
+        totalHours += (kwhTo80 / _chargePowerKw);
+      }
+
+      // 2) 80% ~ 90% 구간: 1차 감발 (평균 15kW 또는 현재 완속 출력 중 작은 값)
+      if (_soc < 90.0) {
+        double startSoc = _soc < 80.0 ? 80.0 : _soc;
+        double kwh80to90 = _batteryTotalKwh * ((90.0 - startSoc) / 100.0);
+        double power80to90 = (_chargePowerKw < 15.0) ? _chargePowerKw : 15.0;
+        totalHours += (kwh80to90 / power80to90);
+      }
+
+      // 3) 90% ~ 100% 구간: 2차 저속 감발 (평균 6kW) + 셀 밸런싱(약 10분)
+      double startSoc90 = _soc < 90.0 ? 90.0 : _soc;
+      double kwh90to100 = _batteryTotalKwh * ((100.0 - startSoc90) / 100.0);
+      double power90to100 = (_chargePowerKw < 6.0) ? _chargePowerKw : 6.0;
+      totalHours += (kwh90to100 / power90to100);
+
+      int totalMinutes = (totalHours * 60).round() + 10; // 셀 밸런싱 버퍼 가산
+      return "${totalMinutes}분";
+    }
+    return "--";
   }
 
   String _calculateCampingRemainingTime(double targetSoc) {
@@ -772,6 +804,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  // 💡 [사진 속 80% / 100% 잔여 시간 뱃지 완벽 복원 우측 패널]
   Widget _buildRightPanel() {
     bool isChargingOrRegen = _chargePowerKw > 0.1;
     bool isFastCharge = _chargePowerKw > 10.0;
@@ -811,12 +844,43 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 ),
                 const SizedBox(height: 6),
                 Row(
-                  crossAxisAlignment: CrossAxisAlignment.baseline,
-                  textBaseline: TextBaseline.alphabetic,
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
-                    Text(_chargePowerKw.toStringAsFixed(1), style: TextStyle(color: isChargingOrRegen ? const Color(0xFFFFB300) : Colors.white38, fontSize: 52, fontWeight: FontWeight.bold)),
-                    const SizedBox(width: 6),
-                    const Text("kW", style: TextStyle(color: Colors.white54, fontSize: 24, fontWeight: FontWeight.bold)),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                      textBaseline: TextBaseline.alphabetic,
+                      children: [
+                        Text(_chargePowerKw.toStringAsFixed(1), style: TextStyle(color: isChargingOrRegen ? const Color(0xFFFFB300) : Colors.white38, fontSize: 48, fontWeight: FontWeight.bold)),
+                        const SizedBox(width: 6),
+                        const Text("kW", style: TextStyle(color: Colors.white54, fontSize: 22, fontWeight: FontWeight.bold)),
+                      ],
+                    ),
+                    // 사진 속 80% / 100% 뱃지
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF00E5FF).withOpacity(0.15),
+                            borderRadius: BorderRadius.circular(6),
+                            border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.4)),
+                          ),
+                          child: Text("80% ${_calculateTimeToSoc(80.0)}", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 13, fontWeight: FontWeight.bold)),
+                        ),
+                        const SizedBox(height: 5),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF00E676).withOpacity(0.15),
+                            borderRadius: BorderRadius.circular(6),
+                            border: Border.all(color: const Color(0xFF00E676).withOpacity(0.4)),
+                          ),
+                          child: Text("100% ${_calculateTimeToSoc(100.0)}", style: const TextStyle(color: Color(0xFF00E676), fontSize: 13, fontWeight: FontWeight.bold)),
+                        ),
+                      ],
+                    ),
                   ],
                 ),
               ],
