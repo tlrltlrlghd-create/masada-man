@@ -47,9 +47,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
   bool _isCampingMode = false;
   static const double _batteryTotalKwh = 38.7;
 
-  // 확인된 순정 모듈 정보 고정
+  // 확인된 순정 모듈 정보
   static const String _targetLoggerId = "F0D6";
-  static const String _targetVinPin = "6075";
 
   BluetoothConnection? _connection;
   bool _isConnected = false;
@@ -58,7 +57,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Timer? _autoConnectTimer;
   Timer? _heartbeatTimer;
 
-  // 실시간 차량 데이터 (초기 기본값)
+  // 실시간 차량 데이터
   double _soc = 0.0;
   double _voltage = 0.0;
   double _current = 0.0;
@@ -147,7 +146,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
       List<BluetoothDevice> devices = await FlutterBluetoothSerial.instance.getBondedDevices();
       BluetoothDevice? targetDevice;
 
-      // 1순위: F0D6 매칭
       for (var d in devices) {
         String name = (d.name ?? '').toUpperCase();
         if (name.contains(_targetLoggerId)) {
@@ -156,7 +154,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
         }
       }
 
-      // 2순위: 일반 매칭
       if (targetDevice == null) {
         for (var d in devices) {
           String name = (d.name ?? '').toUpperCase();
@@ -204,25 +201,30 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
+  // 💡 [버퍼 밀림 및 프레임 경계 완벽 동기화]
   void _processData(Uint8List data) {
     _rxBuffer.addAll(data);
 
-    while (_rxBuffer.length >= 8) {
+    while (_rxBuffer.length >= 10) {
       int headerIndex = -1;
       int packetType = 0;
+      int packetLen = 14;
 
       for (int i = 0; i < _rxBuffer.length - 1; i++) {
         if (_rxBuffer[i] == 0xAA && _rxBuffer[i + 1] == 0x55) {
           headerIndex = i;
           packetType = 1;
+          packetLen = 14;
           break;
         } else if (_rxBuffer[i] == 0x7F && _rxBuffer[i + 1] == 0x7F) {
           headerIndex = i;
           packetType = 2;
+          packetLen = 14;
           break;
         } else if (_rxBuffer[i] == 0x24 && _rxBuffer[i + 1] == 0x45) { // $E
           headerIndex = i;
           packetType = 3;
+          packetLen = 14;
           break;
         }
       }
@@ -238,14 +240,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
         _rxBuffer.removeRange(0, headerIndex);
       }
 
-      if (_rxBuffer.length < 14) break;
+      if (_rxBuffer.length < packetLen) break;
 
-      _parseEvPacket(_rxBuffer.sublist(0, 14), packetType);
-      _rxBuffer.removeRange(0, 14);
+      _parseEvPacket(_rxBuffer.sublist(0, packetLen), packetType);
+      _rxBuffer.removeRange(0, packetLen);
     }
   }
 
-  // 💡 [계기판 69% / 36°C 실측 완벽 매칭 파서]
+  // 💡 [실측 318V / 69% / 36°C 정확 매칭 및 비정상 노이즈 차단]
   void _parseEvPacket(List<int> p, int type) {
     try {
       double parsedSoc = _soc;
@@ -254,61 +256,66 @@ class _DashboardScreenState extends State<DashboardScreen> {
       double parsedTemp = _batteryTemp;
       int parsedSoh = _soh;
 
-      if (type == 1) { // 0xAA 0x55 (BMS 메인 프레임)
-        // 전압 (0.1V 단위)
+      if (type == 1) { // 0xAA 0x55 (BMS 메인 데이터)
+        // 1. 총전압 (0.1V 단위 -> 계기판 318V = Raw 3180)
         int rawVolt = (p[2] << 8) | p[3];
-        if (rawVolt > 500 && rawVolt < 6000) {
+        if (rawVolt >= 2000 && rawVolt <= 4800) {
           parsedVolt = rawVolt / 10.0;
         }
 
-        // 전류 (-32768 Offset 또는 -32000)
+        // 2. 총전류 (0.1A 단위, 기본 32000 또는 32768 오프셋)
         int rawCurr = (p[4] << 8) | p[5];
-        if (rawCurr >= 0 && rawCurr <= 65535) {
-          parsedCurr = (rawCurr - 32768) / 10.0;
-          if (parsedCurr.abs() > 350) {
-            parsedCurr = (rawCurr - 32000) / 10.0;
+        if (rawCurr > 0 && rawCurr < 65535) {
+          double c1 = (rawCurr - 32000) / 10.0;
+          double c2 = (rawCurr - 32768) / 10.0;
+          if (c1.abs() <= 250.0) {
+            parsedCurr = c1;
+          } else if (c2.abs() <= 250.0) {
+            parsedCurr = c2;
           }
         }
 
-        // SOC 매핑 (DBC: Raw 0~250 scale 0.4 또는 직접 1Byte % 값)
+        // 3. SOC (계기판 69% 동기화: 1Byte 0~100 직접 매핑 우선)
         int rawSocByte = p[6];
-        if (rawSocByte > 100 && rawSocByte <= 250) {
-          parsedSoc = rawSocByte * 0.4; // 172.5 * 0.4 = 69.0%
-        } else if (rawSocByte > 0 && rawSocByte <= 100) {
+        if (rawSocByte >= 0 && rawSocByte <= 100) {
           parsedSoc = rawSocByte.toDouble();
+        } else if (rawSocByte > 100 && rawSocByte <= 250) {
+          double scaledSoc = rawSocByte * 0.4;
+          if (scaledSoc <= 100.0) parsedSoc = scaledSoc;
         }
 
-        // 배터리 온도 (-40 Offset)
-        int rawTemp = p[7] - 40;
-        if (rawTemp >= -40 && rawTemp <= 120) {
-          parsedTemp = rawTemp.toDouble();
-        } else if (p[7] > 0 && p[7] <= 100) {
-          parsedTemp = p[7].toDouble(); // Offset 미적용 직독 시
+        // 4. 배터리 온도 (계기판 36°C -> Raw 76 - 40 = 36°C)
+        int tempByte = p[7];
+        if (tempByte >= 40 && tempByte <= 140) {
+          parsedTemp = (tempByte - 40).toDouble();
+        } else if (tempByte >= 0 && tempByte <= 65) {
+          parsedTemp = tempByte.toDouble();
         }
 
-        // SOH
+        // 5. SOH
         if (p.length > 8 && p[8] >= 50 && p[8] <= 100) {
           parsedSoh = p[8];
         }
-      } else if (type == 2 || type == 3) { // 0x7F 0x7F / $E
+      } else if (type == 2 || type == 3) {
         int rawSocByte = p[2];
-        if (rawSocByte > 100 && rawSocByte <= 250) {
-          parsedSoc = rawSocByte * 0.4;
-        } else if (rawSocByte > 0 && rawSocByte <= 100) {
+        if (rawSocByte >= 0 && rawSocByte <= 100) {
           parsedSoc = rawSocByte.toDouble();
         }
 
         int rawVolt = (p[3] << 8) | p[4];
-        if (rawVolt > 500 && rawVolt < 6000) {
+        if (rawVolt >= 2000 && rawVolt <= 4800) {
           parsedVolt = rawVolt / 10.0;
         }
 
         int rawCurr = (p[5] << 8) | p[6];
-        parsedCurr = (rawCurr - 32768) / 10.0;
+        double cVal = (rawCurr - 32000) / 10.0;
+        if (cVal.abs() <= 250.0) {
+          parsedCurr = cVal;
+        }
 
-        int rawTemp = p[7] - 40;
-        if (rawTemp >= -40 && rawTemp <= 120) {
-          parsedTemp = rawTemp.toDouble();
+        int tempByte = p[7];
+        if (tempByte >= 40 && tempByte <= 140) {
+          parsedTemp = (tempByte - 40).toDouble();
         }
 
         if (p.length > 8 && p[8] >= 50 && p[8] <= 100) {
@@ -322,10 +329,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
       _batteryTemp = parsedTemp;
       _soh = parsedSoh == 0 ? 94 : parsedSoh;
 
+      // 실시간 전력 계산 및 비정상 스파이크 차단 (최대 60kW 이내로 가드)
       double calcPower = (_voltage * _current) / 1000.0;
+      if (calcPower.abs() > 65.0) {
+        calcPower = 0.0;
+      }
       _powerKw = calcPower;
 
-      if (_current < 0) {
+      if (_current < -0.5) {
         _chargePowerKw = calcPower.abs();
       } else {
         _chargePowerKw = 0.0;
@@ -583,8 +594,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Widget _buildCampingDashboard() {
-    double consumeWatts = (_voltage * _current).abs();
-    double percentPerHour = consumeWatts > 0 ? (consumeWatts / (_batteryTotalKwh * 1000)) * 100 : 0.0;
+    double liveWatts = (_voltage * _current).abs();
+    if (liveWatts > 65000) liveWatts = 0.0;
+    double percentPerHour = liveWatts > 0 ? (liveWatts / (_batteryTotalKwh * 1000)) * 100 : 0.0;
 
     return Row(
       children: [
@@ -615,7 +627,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         const Text("실시간 소모 전력", style: TextStyle(color: Colors.white54, fontSize: 14)),
                         const SizedBox(height: 2),
                         Text(
-                          "${consumeWatts.toStringAsFixed(0)} W",
+                          "${liveWatts.toStringAsFixed(0)} W",
                           style: const TextStyle(color: Color(0xFFFFB300), fontSize: 24, fontWeight: FontWeight.bold),
                         ),
                       ],
@@ -996,7 +1008,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
     Map<String, dynamic> tempGrade = _getBatteryTempGrade();
     double totalConsumedKwh = _driveEnergyKwh + _hvacEnergyKwh;
     double consumedPct = (_batteryTotalKwh > 0) ? (totalConsumedKwh / _batteryTotalKwh) * 100.0 : 0.0;
-    double liveConsumeWatts = _current > 0 ? (_voltage * _current) : 0.0;
+    double liveConsumeWatts = (_voltage * _current).abs();
+    if (liveConsumeWatts > 65000) liveConsumeWatts = 0.0;
 
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
