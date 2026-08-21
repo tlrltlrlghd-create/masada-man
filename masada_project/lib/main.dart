@@ -37,7 +37,6 @@ class DashboardScreen extends StatefulWidget {
   State<DashboardScreen> createState() => _DashboardScreenState();
 }
 
-// 1초 단위 전비 샘플링 데이터 모델
 class _DrivingSample {
   final double powerKw;
   final double estimatedSpeedKmh;
@@ -67,15 +66,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
   
   // 3분 전비 및 효율 점수
   final List<_DrivingSample> _recent3MinSamples = [];
-  double _recent3MinEfficiency = 5.7; // 기본값 5.7 km/kWh
-  int _efficiencyScore = 50;          // 0~100점
+  double _recent3MinEfficiency = 5.7;
+  int _efficiencyScore = 50;
   
-  // 누적 회생제동 회수량 및 소모 에너지 통계
+  // 누적 통계
   double _accumulatedRegenKwh = 0.0;
-  double _driveEnergyKwh = 0.0;     // 순수 주행 모터 소모 에너지 (kWh)
-  double _hvacEnergyKwh = 0.0;      // 공조/차내 대기 소모 에너지 (kWh)
+  double _driveEnergyKwh = 0.0;
+  double _hvacEnergyKwh = 0.0;
 
-  // 운행 시간 타이머
+  // 운행 시간
   int _drivingSeconds = 0;
   Timer? _drivingTimer;
 
@@ -84,7 +83,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     super.initState();
     _startDrivingTimer();
     _connectToLogger();
-    // 10초마다 자동 연결 시도 (이미 연결 중이거나 연결된 상태면 재시도 X)
+    // 10초마다 자동 연결 시도
     _autoConnectTimer = Timer.periodic(const Duration(seconds: 10), (timer) {
       if (!_isConnected && !_isConnecting) {
         _connectToLogger();
@@ -107,12 +106,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
           _drivingSeconds++;
           
           if (!_isCampingMode) {
-            // 1. 회생제동 중일 때 1초 단위 적분 누적
             if (_current < -0.5 && _chargePowerKw > 0.1) {
               _accumulatedRegenKwh += (_chargePowerKw / 3600.0);
             }
 
-            // 2. 에너지 소모 요인 분리 누적 (1kW 초과는 주행, 1kW 이하는 공조/대기)
             if (_powerKw > 1.0) {
               _driveEnergyKwh += (_powerKw / 3600.0);
             } else if (_powerKw > 0.05) {
@@ -120,7 +117,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
             }
           }
 
-          // 3. 3분 실시간 전비 및 점수 계산
           if (!_isCampingMode && _isConnected) {
             _update3MinEfficiency();
           }
@@ -129,7 +125,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     });
   }
 
-  // 3분 슬라이딩 윈도우 전비 및 점수 계산
   void _update3MinEfficiency() {
     double speed = 0.0;
     if (_powerKw > 1.0) {
@@ -156,16 +151,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
       }
     }
 
-    // 3.7 ~ 7.7 km/kWh -> 0 ~ 100 점수 변환
     double rawScore = ((_recent3MinEfficiency - 3.7) / (7.7 - 3.7)) * 100.0;
     _efficiencyScore = rawScore.clamp(0.0, 100.0).round();
 
-    // 3분 전비 연동 주행거리
     double currentRemainKwh = (_batteryTotalKwh * (_soh / 100.0)) * (_soc / 100.0);
     _bmsDistance = double.parse((currentRemainKwh * _recent3MinEfficiency).toStringAsFixed(1));
   }
 
-  // 🎨 전비 점수별 공통 테마 컬러
   Color _getEfficiencyColor(int score) {
     if (score >= 80) return const Color(0xFF00E676);
     if (score >= 60) return const Color(0xFF00E5FF);
@@ -181,9 +173,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return "${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}";
   }
 
-  // ==========================================
-  // 🌡️ 배터리 온도별 안전 가속 한계치(kW) 및 색상 결정
-  // ==========================================
   double _getSafePowerLimitKw(double temp) {
     if (temp < 0) return 15.0;
     if (temp < 10) return 25.0;
@@ -204,12 +193,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return const Color(0xFF00E676);
   }
 
-  // ==========================================
-  // 🌡️ 배터리 온도별 급속충전 등급 및 컬러 평가
-  // ==========================================
   Map<String, dynamic> _getBatteryTempGrade() {
     double t = _batteryTemp;
-    
     if (t >= 15.0 && t <= 45.0) {
       return {'grade': 'S', 'amp': '120A', 'color': const Color(0xFF00E676), 'desc': '최적 풀파워'};
     } else if (t >= 10.0 && t < 15.0) {
@@ -286,7 +271,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return "$h시간 $m분";
   }
 
-  // 🔄 기존 10초 주기 자동 연결 + 원클릭 수동 연결 로직
+  // 🔄 올인원 호환성 극대화 블루투스 연결 함수
   Future<void> _connectToLogger() async {
     if (_isConnected || _isConnecting) return;
 
@@ -295,12 +280,25 @@ class _DashboardScreenState extends State<DashboardScreen> {
     });
 
     try {
+      if (_connection != null) {
+        await _connection?.close();
+        _connection?.dispose();
+        _connection = null;
+        await Future.delayed(const Duration(milliseconds: 300));
+      }
+
       List<BluetoothDevice> devices = await FlutterBluetoothSerial.instance.getBondedDevices();
       BluetoothDevice? targetDevice;
 
       for (var d in devices) {
         String name = (d.name ?? '').toUpperCase();
-        if (name.contains('EV') || name.contains('LOGGER') || name.contains('OBD') || name.contains('MASADA')) {
+        if (name.contains('EV') || 
+            name.contains('LOGGER') || 
+            name.contains('OBD') || 
+            name.contains('MASADA') || 
+            name.contains('LINK') ||
+            name.contains('IOS-VLINK') ||
+            name.contains('BT')) {
           targetDevice = d;
           break;
         }
@@ -330,7 +328,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
             }
           },
           onError: (error) {
-            debugPrint("[BLE Error] $error");
+            if (mounted) {
+              setState(() {
+                _isConnected = false;
+                _isConnecting = false;
+              });
+            }
           },
           cancelOnError: false,
         );
@@ -458,7 +461,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           _isCampingMode ? "MASADA VAN  CAMPING MODE" : "MASADA VAN  EV MONITOR",
           style: TextStyle(
             color: _isCampingMode ? const Color(0xFFFFB300) : const Color(0xFF00E676),
-            fontSize: 17,
+            fontSize: 18,
             fontWeight: FontWeight.bold,
             letterSpacing: 1.2,
           ),
@@ -472,7 +475,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 });
               },
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
                 decoration: BoxDecoration(
                   color: _isCampingMode ? const Color(0xFFFFB300).withOpacity(0.2) : const Color(0xFF1E242C),
                   borderRadius: BorderRadius.circular(12),
@@ -486,14 +489,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     Icon(
                       _isCampingMode ? Icons.bedtime : Icons.night_shelter_outlined,
                       color: _isCampingMode ? const Color(0xFFFFB300) : Colors.white70,
-                      size: 14,
+                      size: 16,
                     ),
-                    const SizedBox(width: 5),
+                    const SizedBox(width: 6),
                     Text(
                       "캠핑 모드",
                       style: TextStyle(
                         color: _isCampingMode ? const Color(0xFFFFB300) : Colors.white70,
-                        fontSize: 12,
+                        fontSize: 13,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
@@ -503,7 +506,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ),
             const SizedBox(width: 8),
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
               decoration: BoxDecoration(
                 color: const Color(0xFF1E242C),
                 borderRadius: BorderRadius.circular(12),
@@ -512,8 +515,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
               child: const Row(
                 children: [
                   Icon(Icons.circle, color: Color(0xFF00E676), size: 8),
-                  SizedBox(width: 5),
-                  Text("오리지널 네온", style: TextStyle(color: Color(0xFF00E676), fontSize: 12)),
+                  SizedBox(width: 6),
+                  Text("오리지널 네온", style: TextStyle(color: Color(0xFF00E676), fontSize: 13)),
                 ],
               ),
             ),
@@ -521,7 +524,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             GestureDetector(
               onTap: _connectToLogger,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                 decoration: BoxDecoration(
                   color: const Color(0xFF1E242C),
                   borderRadius: BorderRadius.circular(12),
@@ -536,12 +539,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       color: _isConnected ? const Color(0xFF00E676) : Colors.redAccent,
                       size: 8,
                     ),
-                    const SizedBox(width: 5),
+                    const SizedBox(width: 6),
                     Text(
                       _isConnected ? "EvLogger 연결됨" : (_isConnecting ? "연결 시도 중..." : "수동 연결"),
                       style: TextStyle(
                         color: _isConnected ? const Color(0xFF00E676) : Colors.redAccent,
-                        fontSize: 12,
+                        fontSize: 13,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
@@ -555,14 +558,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  // 💡 메인 3분할 비율 (3 : 5.2 : 3)
   Widget _buildStandardDashboard() {
     return Row(
       children: [
-        Expanded(flex: 3, child: _buildLeftPanel()),
+        Expanded(flex: 30, child: _buildLeftPanel()),
         const SizedBox(width: 12),
-        Expanded(flex: 5, child: _buildCenterSocGauge()),
+        Expanded(flex: 52, child: _buildCenterSocGauge()),
         const SizedBox(width: 12),
-        Expanded(flex: 3, child: _buildRightPanel()),
+        Expanded(flex: 30, child: _buildRightPanel()),
       ],
     );
   }
@@ -576,7 +580,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         Expanded(
           flex: 4,
           child: Container(
-            padding: const EdgeInsets.all(14),
+            padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
               color: const Color(0xFF13171D),
               borderRadius: BorderRadius.circular(16),
@@ -585,11 +589,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                const Text("현재 배터리 잔량", style: TextStyle(color: Colors.white54, fontSize: 13)),
+                const Text("현재 배터리 잔량", style: TextStyle(color: Colors.white54, fontSize: 14)),
                 const SizedBox(height: 4),
                 Text(
                   "${_soc.toStringAsFixed(1)} %",
-                  style: const TextStyle(color: Color(0xFF00E676), fontSize: 44, fontWeight: FontWeight.bold),
+                  style: const TextStyle(color: Color(0xFF00E676), fontSize: 48, fontWeight: FontWeight.bold),
                 ),
                 const Divider(color: Colors.white12, height: 16),
                 Row(
@@ -597,21 +601,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   children: [
                     Column(
                       children: [
-                        const Text("실시간 소모 전력", style: TextStyle(color: Colors.white54, fontSize: 12)),
+                        const Text("실시간 소모 전력", style: TextStyle(color: Colors.white54, fontSize: 13)),
                         const SizedBox(height: 2),
                         Text(
                           "${consumeWatts.toStringAsFixed(0)} W",
-                          style: const TextStyle(color: Color(0xFFFFB300), fontSize: 20, fontWeight: FontWeight.bold),
+                          style: const TextStyle(color: Color(0xFFFFB300), fontSize: 22, fontWeight: FontWeight.bold),
                         ),
                       ],
                     ),
                     Column(
                       children: [
-                        const Text("시간당 소모율", style: TextStyle(color: Colors.white54, fontSize: 12)),
+                        const Text("시간당 소모율", style: TextStyle(color: Colors.white54, fontSize: 13)),
                         const SizedBox(height: 2),
                         Text(
                           "${percentPerHour.toStringAsFixed(1)} %/h",
-                          style: const TextStyle(color: Colors.cyanAccent, fontSize: 20, fontWeight: FontWeight.bold),
+                          style: const TextStyle(color: Colors.cyanAccent, fontSize: 22, fontWeight: FontWeight.bold),
                         ),
                       ],
                     ),
@@ -658,7 +662,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }) {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
         color: const Color(0xFF13171D),
         borderRadius: BorderRadius.circular(14),
@@ -671,26 +675,26 @@ class _DashboardScreenState extends State<DashboardScreen> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(title, style: const TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.w500)),
-              Text(subInfo, style: const TextStyle(color: Colors.white38, fontSize: 11)),
+              Text(title, style: const TextStyle(color: Colors.white70, fontSize: 14, fontWeight: FontWeight.w500)),
+              Text(subInfo, style: const TextStyle(color: Colors.white38, fontSize: 12)),
             ],
           ),
           const SizedBox(height: 4),
           Text(
             remainingTime,
-            style: TextStyle(color: accentColor, fontSize: 28, fontWeight: FontWeight.bold),
+            style: TextStyle(color: accentColor, fontSize: 32, fontWeight: FontWeight.bold),
           ),
         ],
       ),
     );
   }
 
+  // 💡 좌측 패널 (대형 폰트 적용)
   Widget _buildLeftPanel() {
     Color effThemeColor = _getEfficiencyColor(_efficiencyScore);
 
     return Column(
       children: [
-        // 1. 실시간 주행 효율 점수판
         Expanded(
           child: Container(
             width: double.infinity,
@@ -706,7 +710,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               children: [
                 const Text(
                   "실시간 주행 효율 (3분)",
-                  style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.w500),
+                  style: TextStyle(color: Colors.white70, fontSize: 14, fontWeight: FontWeight.w500),
                 ),
                 const SizedBox(height: 6),
                 Row(
@@ -715,10 +719,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   children: [
                     Text(
                       "$_efficiencyScore",
-                      style: TextStyle(color: effThemeColor, fontSize: 34, fontWeight: FontWeight.bold),
+                      style: TextStyle(color: effThemeColor, fontSize: 38, fontWeight: FontWeight.bold),
                     ),
                     const SizedBox(width: 4),
-                    const Text("점", style: TextStyle(color: Colors.white54, fontSize: 15, fontWeight: FontWeight.bold)),
+                    const Text("점", style: TextStyle(color: Colors.white54, fontSize: 16, fontWeight: FontWeight.bold)),
                   ],
                 ),
               ],
@@ -726,7 +730,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ),
         const SizedBox(height: 10),
-        // 2. BMS 주행가능거리
         Expanded(
           child: _buildCard(
             title: "BMS 주행가능거리 (3분 전비)",
@@ -739,6 +742,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  // 💡 중앙 게이지 대형화 (280px x 280px)
   Widget _buildCenterSocGauge() {
     Color effThemeColor = _getEfficiencyColor(_efficiencyScore);
 
@@ -753,11 +757,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
           alignment: Alignment.center,
           children: [
             SizedBox(
-              width: 215,
-              height: 215,
+              width: 250,
+              height: 250,
               child: CircularProgressIndicator(
                 value: _soc / 100.0,
-                strokeWidth: 17,
+                strokeWidth: 20,
                 backgroundColor: const Color(0xFF222A35),
                 valueColor: AlwaysStoppedAnimation<Color>(effThemeColor),
               ),
@@ -774,7 +778,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       _recent3MinEfficiency.toStringAsFixed(1),
                       style: TextStyle(
                         color: effThemeColor,
-                        fontSize: 22,
+                        fontSize: 26,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
@@ -783,7 +787,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       "km/kWh",
                       style: TextStyle(
                         color: effThemeColor.withOpacity(0.85),
-                        fontSize: 13,
+                        fontSize: 14,
                         fontWeight: FontWeight.w600,
                       ),
                     ),
@@ -799,7 +803,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       _soc.toStringAsFixed(1),
                       style: TextStyle(
                         color: effThemeColor,
-                        fontSize: 46,
+                        fontSize: 54,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
@@ -807,7 +811,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       "%",
                       style: TextStyle(
                         color: effThemeColor,
-                        fontSize: 20,
+                        fontSize: 24,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
@@ -821,6 +825,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  // 💡 우측 패널 (대형 폰트 적용)
   Widget _buildRightPanel() {
     bool isChargingOrRegen = _chargePowerKw > 0.1;
     bool isFastCharge = _chargePowerKw > 10.0;
@@ -851,7 +856,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     return Column(
       children: [
-        // 1. 상단: 실시간 충전량 카드
         Expanded(
           child: Container(
             width: double.infinity,
@@ -870,7 +874,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text(cardTitle, style: TextStyle(color: titleColor, fontSize: 13, fontWeight: FontWeight.bold)),
+                    Text(cardTitle, style: TextStyle(color: titleColor, fontSize: 14, fontWeight: FontWeight.bold)),
                     Text(subRate, style: TextStyle(color: isChargingOrRegen ? const Color(0xFFFFB300) : Colors.white38, fontSize: 12)),
                   ],
                 ),
@@ -883,19 +887,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       _chargePowerKw.toStringAsFixed(1),
                       style: TextStyle(
                         color: isChargingOrRegen ? const Color(0xFFFFB300) : Colors.white38,
-                        fontSize: 32,
+                        fontSize: 36,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
                     const SizedBox(width: 4),
-                    const Text("kW", style: TextStyle(color: Colors.white54, fontSize: 15, fontWeight: FontWeight.bold)),
+                    const Text("kW", style: TextStyle(color: Colors.white54, fontSize: 16, fontWeight: FontWeight.bold)),
                   ],
                 ),
                 if (bottomNotice != null) ...[
                   const SizedBox(height: 2),
                   Text(
                     bottomNotice,
-                    style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 11, fontWeight: FontWeight.bold),
+                    style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 12, fontWeight: FontWeight.bold),
                   ),
                 ],
               ],
@@ -903,7 +907,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ),
         const SizedBox(height: 10),
-        // 2. 하단 (3시 방향): 주행% 공조% & 회생 정보
         Expanded(
           child: Container(
             width: double.infinity,
@@ -926,17 +929,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       "회생 ${regenKw.toStringAsFixed(1)}kW",
                       style: TextStyle(
                         color: regenKw > 0.1 ? const Color(0xFFFF9100) : Colors.white54,
-                        fontSize: 12,
+                        fontSize: 13,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
                     Text(
                       "+${regenPct.toStringAsFixed(1)}%",
-                      style: const TextStyle(color: Color(0xFF00E676), fontSize: 11, fontWeight: FontWeight.bold),
+                      style: const TextStyle(color: Color(0xFF00E676), fontSize: 12, fontWeight: FontWeight.bold),
                     ),
                     Text(
                       "+${gainedKm.toStringAsFixed(1)}km 이득",
-                      style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 11, fontWeight: FontWeight.bold),
+                      style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 12, fontWeight: FontWeight.bold),
                     ),
                   ],
                 ),
@@ -945,16 +948,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   crossAxisAlignment: CrossAxisAlignment.baseline,
                   textBaseline: TextBaseline.alphabetic,
                   children: [
-                    const Text("주행 ", style: TextStyle(color: Colors.white70, fontSize: 14)),
+                    const Text("주행 ", style: TextStyle(color: Colors.white70, fontSize: 15)),
                     Text(
                       "$drivePct%",
-                      style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 26, fontWeight: FontWeight.bold),
+                      style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 28, fontWeight: FontWeight.bold),
                     ),
-                    const SizedBox(width: 8),
-                    const Text("· 공조 ", style: TextStyle(color: Colors.white70, fontSize: 14)),
+                    const SizedBox(width: 10),
+                    const Text("· 공조 ", style: TextStyle(color: Colors.white70, fontSize: 15)),
                     Text(
                       "$hvacPct%",
-                      style: const TextStyle(color: Color(0xFFFFB300), fontSize: 26, fontWeight: FontWeight.bold),
+                      style: const TextStyle(color: Color(0xFFFFB300), fontSize: 28, fontWeight: FontWeight.bold),
                     ),
                   ],
                 ),
@@ -988,9 +991,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(title, style: const TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.w500)),
+              Text(title, style: const TextStyle(color: Colors.white70, fontSize: 14, fontWeight: FontWeight.w500)),
               if (subText != null)
-                Text(subText, style: const TextStyle(color: Colors.white38, fontSize: 11)),
+                Text(subText, style: const TextStyle(color: Colors.white38, fontSize: 12)),
             ],
           ),
           const SizedBox(height: 6),
@@ -998,9 +1001,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
             crossAxisAlignment: CrossAxisAlignment.baseline,
             textBaseline: TextBaseline.alphabetic,
             children: [
-              Text(valueText, style: TextStyle(color: valueColor, fontSize: 32, fontWeight: FontWeight.bold)),
+              Text(valueText, style: TextStyle(color: valueColor, fontSize: 36, fontWeight: FontWeight.bold)),
               const SizedBox(width: 4),
-              Text(unitText, style: const TextStyle(color: Colors.white54, fontSize: 15, fontWeight: FontWeight.bold)),
+              Text(unitText, style: const TextStyle(color: Colors.white54, fontSize: 16, fontWeight: FontWeight.bold)),
             ],
           ),
         ],
@@ -1009,7 +1012,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   // ==========================================
-  // ⚡ 파워바 게이지
+  // ⚡ 파워바 게이지 (높이 및 폰트 확장)
   // ==========================================
   Widget _buildPowerBar() {
     double normalized = ((_powerKw + 50) / 100).clamp(0.0, 1.0);
@@ -1029,29 +1032,29 @@ class _DashboardScreenState extends State<DashboardScreen> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text("◀ 회생제동 (REGEN)", style: TextStyle(color: Color(0xFFFF9100), fontSize: 11, fontWeight: FontWeight.bold)),
+              const Text("◀ 회생제동 (REGEN)", style: TextStyle(color: Color(0xFFFF9100), fontSize: 12, fontWeight: FontWeight.bold)),
               Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
                     "실시간: ${_powerKw.toStringAsFixed(1)} kW",
-                    style: TextStyle(color: dynamicBarColor, fontSize: 13, fontWeight: FontWeight.bold),
+                    style: TextStyle(color: dynamicBarColor, fontSize: 14, fontWeight: FontWeight.bold),
                   ),
                   const SizedBox(width: 8),
                   Text(
                     "(한계: ${safeLimitKw.toStringAsFixed(0)}kW)",
-                    style: const TextStyle(color: Colors.white38, fontSize: 11),
+                    style: const TextStyle(color: Colors.white38, fontSize: 12),
                   ),
                 ],
               ),
-              const Text("가속 출력 (POWER) ▶", style: TextStyle(color: Colors.redAccent, fontSize: 11, fontWeight: FontWeight.bold)),
+              const Text("가속 출력 (POWER) ▶", style: TextStyle(color: Colors.redAccent, fontSize: 12, fontWeight: FontWeight.bold)),
             ],
           ),
           const SizedBox(height: 6),
           LayoutBuilder(
             builder: (context, constraints) {
               double barWidth = constraints.maxWidth;
-              double pinLeft = (barWidth * limitNormalized) - 3.5;
+              double pinLeft = (barWidth * limitNormalized) - 4.0;
 
               return Stack(
                 clipBehavior: Clip.none,
@@ -1061,21 +1064,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     value: normalized,
                     backgroundColor: const Color(0xFF222A35),
                     valueColor: AlwaysStoppedAnimation<Color>(dynamicBarColor),
-                    minHeight: 8,
+                    minHeight: 10,
                   ),
                   Positioned(
                     left: (barWidth * 0.5) - 1.0,
                     child: Container(
                       width: 2.0,
-                      height: 11,
+                      height: 14,
                       color: Colors.white54,
                     ),
                   ),
                   Positioned(
-                    left: pinLeft.clamp(0.0, barWidth - 7.0),
+                    left: pinLeft.clamp(0.0, barWidth - 8.0),
                     child: Container(
-                      width: 7,
-                      height: 13,
+                      width: 8,
+                      height: 16,
                       decoration: BoxDecoration(
                         color: Colors.redAccent,
                         borderRadius: BorderRadius.circular(2.0),
@@ -1094,7 +1097,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  // 💡 하단 상태 바
+  // 💡 하단 카드 (글자 크기 14~15pt로 대폭 확대)
   Widget _buildBottomStatusBar() {
     Map<String, dynamic> tempGrade = _getBatteryTempGrade();
     double totalConsumedKwh = _driveEnergyKwh + _hvacEnergyKwh;
@@ -1109,10 +1112,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
           title: "운행 시간",
           child: Text(
             _formatDrivingTime(_drivingSeconds),
-            style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 13, fontWeight: FontWeight.bold),
+            style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 14, fontWeight: FontWeight.bold),
           ),
         ),
-        // 2. 이번 운행 소모량 (0.0 kWh)
+        // 2. 이번 운행 소모량
         _buildBottomCard(
           title: "이번 운행 소모량",
           child: Row(
@@ -1120,24 +1123,24 @@ class _DashboardScreenState extends State<DashboardScreen> {
             children: [
               Text(
                 "${totalConsumedKwh.toStringAsFixed(1)} kWh",
-                style: const TextStyle(color: Color(0xFFFFB300), fontSize: 13, fontWeight: FontWeight.bold),
+                style: const TextStyle(color: Color(0xFFFFB300), fontSize: 14, fontWeight: FontWeight.bold),
               ),
               const SizedBox(width: 4),
               Text(
                 "(-${consumedPct.toStringAsFixed(1)}%)",
-                style: const TextStyle(color: Color(0xFFFF5252), fontSize: 11, fontWeight: FontWeight.bold),
+                style: const TextStyle(color: Color(0xFFFF5252), fontSize: 12, fontWeight: FontWeight.bold),
               ),
             ],
           ),
         ),
-        // 3. 실시간 소모 전력 (W)
+        // 3. 실시간 소모 전력
         _buildBottomCard(
           title: "실시간 소모 전력",
           child: Text(
             "${liveConsumeWatts.toStringAsFixed(0)} W",
             style: TextStyle(
               color: liveConsumeWatts > 1000 ? const Color(0xFFFFB300) : Colors.white,
-              fontSize: 13,
+              fontSize: 14,
               fontWeight: FontWeight.bold,
             ),
           ),
@@ -1147,7 +1150,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           title: "배터리 건강(SOH)",
           child: Text(
             "$_soh %",
-            style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 13, fontWeight: FontWeight.bold),
+            style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 14, fontWeight: FontWeight.bold),
           ),
         ),
         // 5. 배터리 온도 & 등급
@@ -1162,7 +1165,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 children: [
                   Text(
                     "${_batteryTemp.toStringAsFixed(1)}°C",
-                    style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold),
+                    style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold),
                   ),
                   const SizedBox(width: 4),
                   Container(
@@ -1174,7 +1177,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     ),
                     child: Text(
                       "${tempGrade['grade']} (${tempGrade['amp']})",
-                      style: TextStyle(color: tempGrade['color'] as Color, fontSize: 10, fontWeight: FontWeight.bold),
+                      style: TextStyle(color: tempGrade['color'] as Color, fontSize: 11, fontWeight: FontWeight.bold),
                     ),
                   ),
                 ],
@@ -1184,7 +1187,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 alignment: Alignment.centerLeft,
                 children: [
                   Container(
-                    width: 80,
+                    width: 90,
                     height: 5,
                     decoration: BoxDecoration(
                       borderRadius: BorderRadius.circular(2.5),
@@ -1201,10 +1204,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     ),
                   ),
                   Positioned(
-                    left: (((_batteryTemp + 10) / 70.0).clamp(0.0, 1.0) * 74),
+                    left: (((_batteryTemp + 10) / 70.0).clamp(0.0, 1.0) * 83),
                     child: Container(
-                      width: 6,
-                      height: 6,
+                      width: 7,
+                      height: 7,
                       decoration: const BoxDecoration(
                         color: Colors.white,
                         shape: BoxShape.circle,
@@ -1223,7 +1226,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   Widget _buildBottomCard({required String title, required Widget child}) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
         color: const Color(0xFF13171D),
         borderRadius: BorderRadius.circular(8),
@@ -1232,7 +1235,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(title, style: const TextStyle(color: Colors.white54, fontSize: 10, fontWeight: FontWeight.w500)),
+          Text(title, style: const TextStyle(color: Colors.white54, fontSize: 11, fontWeight: FontWeight.w500)),
           const SizedBox(height: 3),
           child,
         ],
