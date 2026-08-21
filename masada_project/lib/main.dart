@@ -108,28 +108,45 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   // ==========================================
-  // 🌡️ 마사다 배터리 온도별 급속충전 등급 및 컬러 평가 (저온/고온 완벽 분리)
+  // 🌡️ 배터리 온도별 안전 가속 한계치(kW) 및 색상 결정
+  // ==========================================
+  double _getSafePowerLimitKw(double temp) {
+    if (temp < 0) return 15.0;       // 영하: 15kW 제한
+    if (temp < 10) return 25.0;      // 0~10도: 25kW 제한
+    if (temp < 20) return 40.0;      // 10~20도: 40kW 제한
+    return 50.0;                     // 20도 이상: 50kW 정상 풀파워
+  }
+
+  Color _getPowerGaugeColor(double powerKw, double temp) {
+    if (powerKw < 0) {
+      return const Color(0xFFFF9100); // 회생제동 (앰버 오렌지)
+    }
+    double limit = _getSafePowerLimitKw(temp);
+    if (powerKw > limit) {
+      return const Color(0xFFFF5252); // 과가속 경고 (빨강)
+    } else if (powerKw > limit * 0.75) {
+      return const Color(0xFFFFB300); // 주의 구간 (주황/옐로우)
+    }
+    return const Color(0xFF00E676);   // 정상 안전 주행 (네온 그린)
+  }
+
+  // ==========================================
+  // 🌡️ 마사다 배터리 온도별 급속충전 등급 및 컬러 평가
   // ==========================================
   Map<String, dynamic> _getBatteryTempGrade() {
     double t = _batteryTemp;
     
     if (t >= 15.0 && t <= 45.0) {
-      // 15도 ~ 45도: 최적 풀파워 (초록)
       return {'grade': 'S', 'amp': '120A', 'color': const Color(0xFF00E676), 'desc': '최적 풀파워'};
     } else if (t >= 10.0 && t < 15.0) {
-      // 10도 ~ 15도: 저온 63A 감발 (하늘/시안색)
       return {'grade': 'A(저온)', 'amp': '63A', 'color': const Color(0xFF00E5FF), 'desc': '저온 감발'};
     } else if (t > 45.0 && t <= 48.0) {
-      // 45도 ~ 48도: 고온 63A 감발 (옐로우/앰버)
       return {'grade': 'A(고온)', 'amp': '63A', 'color': const Color(0xFFFFD600), 'desc': '고온 진입'};
     } else if (t > 48.0 && t <= 54.0) {
-      // 48도 ~ 54도: 고온 42A 감발 (주황)
       return {'grade': 'B', 'amp': '42A', 'color': const Color(0xFFFF9100), 'desc': '고온 감발'};
     } else if (t >= 0.0 && t < 10.0) {
-      // 0도 ~ 10도: 극저온 25A 감발 (파랑)
       return {'grade': 'C', 'amp': '25A', 'color': const Color(0xFF2979FF), 'desc': '극저온'};
     } else {
-      // 55도 이상(과열) 또는 영하(배터리 결빙 방지): 13A 초저속 (빨강)
       return {'grade': 'D', 'amp': '13A', 'color': const Color(0xFFFF5252), 'desc': '초저속/제한'};
     }
   }
@@ -794,8 +811,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  // ==========================================
+  // ⚡ 배터리 온도별 동적 한계선(눈금) & 가속 색상 반영 파워바
+  // ==========================================
   Widget _buildPowerBar() {
     double normalized = ((_powerKw + 50) / 100).clamp(0.0, 1.0);
+    double safeLimitKw = _getSafePowerLimitKw(_batteryTemp);
+    // 한계 눈금 위치 (-50kW ~ +50kW 범위에서 임계값의 비율)
+    double limitNormalized = ((safeLimitKw + 50) / 100).clamp(0.0, 1.0);
+    Color dynamicBarColor = _getPowerGaugeColor(_powerKw, _batteryTemp);
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
@@ -810,21 +834,68 @@ class _DashboardScreenState extends State<DashboardScreen> {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               const Text("◀ 회생제동 (REGEN)", style: TextStyle(color: Color(0xFFFF9100), fontSize: 10)),
-              Text(
-                "실시간 파워: ${_powerKw.toStringAsFixed(1)} kW",
-                style: const TextStyle(color: Color(0xFFFFB300), fontSize: 11, fontWeight: FontWeight.bold),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    "실시간: ${_powerKw.toStringAsFixed(1)} kW",
+                    style: TextStyle(color: dynamicBarColor, fontSize: 11, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    "(한계: ${safeLimitKw.toStringAsFixed(0)}kW)",
+                    style: const TextStyle(color: Colors.white38, fontSize: 10),
+                  ),
+                ],
               ),
               const Text("가속 출력 (POWER) ▶", style: TextStyle(color: Colors.redAccent, fontSize: 10)),
             ],
           ),
           const SizedBox(height: 4),
-          LinearProgressIndicator(
-            value: normalized,
-            backgroundColor: const Color(0xFF222A35),
-            valueColor: AlwaysStoppedAnimation<Color>(
-              _powerKw < 0 ? const Color(0xFFFF9100) : const Color(0xFF00E676),
-            ),
-            minHeight: 6,
+          // 파워 게이지 바 + 온도별 동적 한계선 인디케이터
+          LayoutBuilder(
+            builder: (context, constraints) {
+              double barWidth = constraints.maxWidth;
+              double pinLeft = (barWidth * limitNormalized) - 3.0; // 핀 너비의 절반 보정
+
+              return Stack(
+                clipBehavior: Clip.none,
+                alignment: Alignment.centerLeft,
+                children: [
+                  // 실시간 파워 게이지 바
+                  LinearProgressIndicator(
+                    value: normalized,
+                    backgroundColor: const Color(0xFF222A35),
+                    valueColor: AlwaysStoppedAnimation<Color>(dynamicBarColor),
+                    minHeight: 6,
+                  ),
+                  // 중앙 0kW 기준선 눈금
+                  Positioned(
+                    left: (barWidth * 0.5) - 0.5,
+                    child: Container(
+                      width: 1.5,
+                      height: 8,
+                      color: Colors.white30,
+                    ),
+                  ),
+                  // 📍 배터리 온도별 동적 안전 한계선 눈금 (붉은색 핀)
+                  Positioned(
+                    left: pinLeft.clamp(0.0, barWidth - 6.0),
+                    child: Container(
+                      width: 6,
+                      height: 10,
+                      decoration: BoxDecoration(
+                        color: Colors.redAccent,
+                        borderRadius: BorderRadius.circular(1.5),
+                        boxShadow: const [
+                          BoxShadow(color: Colors.black54, blurRadius: 2, offset: Offset(0, 1)),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              );
+            },
           ),
         ],
       ),
