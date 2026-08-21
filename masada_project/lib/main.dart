@@ -838,10 +838,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
       }
     }
 
+    // 에너지 소모 비율 계산
     double totalConsumed = _driveEnergyKwh + _hvacEnergyKwh;
     int drivePct = totalConsumed > 0.01 ? ((_driveEnergyKwh / totalConsumed) * 100).round() : 85;
     int hvacPct = 100 - drivePct;
 
+    // 회생 관련 연산
     double regenKw = _current < 0 ? _chargePowerKw : 0.0;
     double regenPct = (_accumulatedRegenKwh / _batteryTotalKwh) * 100.0;
     double gainedKm = _accumulatedRegenKwh * _recent3MinEfficiency;
@@ -1010,6 +1012,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  // ==========================================
+  // ⚡ 배터리 온도별 동적 한계선(눈금) & 가속 색상 반영 파워바
+  // ==========================================
   Widget _buildPowerBar() {
     double normalized = ((_powerKw + 50) / 100).clamp(0.0, 1.0);
     double safeLimitKw = _getSafePowerLimitKw(_batteryTemp);
@@ -1093,12 +1098,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  // 💡 수정된 하단 상태 바 (2번째 카드: 소모 kWh + 소모 % 표시)
+  // 💡 수정된 하단 상태 바 (0.0 kWh 표기 + 실시간 소모량 W 신규 카드 추가)
   Widget _buildBottomStatusBar() {
     Map<String, dynamic> tempGrade = _getBatteryTempGrade();
     double totalConsumedKwh = _driveEnergyKwh + _hvacEnergyKwh;
-    // 이번 운행 소모 비율 (%)
-    double consumedPct = (totalConsumedKwh / _batteryTotalKwh) * 100.0;
+    
+    // 이번 운행으로 소모된 배터리 % 환산
+    double consumedPct = (_batteryTotalKwh > 0) ? (totalConsumedKwh / _batteryTotalKwh) * 100.0 : 0.0;
+
+    // 실시간 순수 소모 전력 (W) (충전/회생 중일 땐 0W 표기)
+    double liveConsumeWatts = _current > 0 ? (_voltage * _current) : 0.0;
 
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -1111,14 +1120,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
             style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 12, fontWeight: FontWeight.bold),
           ),
         ),
-        // 2. 📍 수정: 이번 운행 배터리 소모량 (kWh) & 소모 비율 (-%)
+        // 2. 📍 이번 운행 배터리 소모량 (0.0 kWh로 소수점 조정 + 소모 %)
         _buildBottomCard(
           title: "이번 운행 소모량",
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                "${totalConsumedKwh.toStringAsFixed(2)} kWh",
+                "${totalConsumedKwh.toStringAsFixed(1)} kWh",
                 style: const TextStyle(color: Color(0xFFFFB300), fontSize: 12, fontWeight: FontWeight.bold),
               ),
               const SizedBox(width: 4),
@@ -1129,7 +1138,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ],
           ),
         ),
-        // 3. 배터리 건강도
+        // 3. 📍 신규 추가: 실시간 소모 전력 (W)
+        _buildBottomCard(
+          title: "실시간 소모 전력",
+          child: Text(
+            "${liveConsumeWatts.toStringAsFixed(0)} W",
+            style: TextStyle(
+              color: liveConsumeWatts > 1000 ? const Color(0xFFFFB300) : Colors.white,
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+        // 4. 배터리 건강도
         _buildBottomCard(
           title: "배터리 건강(SOH)",
           child: Text(
@@ -1137,7 +1158,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 12, fontWeight: FontWeight.bold),
           ),
         ),
-        // 4. 배터리 온도 & 저온/고온 분리 급속 등급
+        // 5. 배터리 온도 & 저온/고온 분리 급속 등급
         _buildBottomCard(
           title: "배터리온도 & 급속허용",
           child: Column(
@@ -1171,7 +1192,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 alignment: Alignment.centerLeft,
                 children: [
                   Container(
-                    width: 90,
+                    width: 75,
                     height: 4,
                     decoration: BoxDecoration(
                       borderRadius: BorderRadius.circular(2),
@@ -1188,7 +1209,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     ),
                   ),
                   Positioned(
-                    left: (((_batteryTemp + 10) / 70.0).clamp(0.0, 1.0) * 84),
+                    left: (((_batteryTemp + 10) / 70.0).clamp(0.0, 1.0) * 69),
                     child: Container(
                       width: 6,
                       height: 6,
@@ -1210,7 +1231,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   Widget _buildBottomCard({required String title, required Widget child}) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
         color: const Color(0xFF13171D),
         borderRadius: BorderRadius.circular(8),
