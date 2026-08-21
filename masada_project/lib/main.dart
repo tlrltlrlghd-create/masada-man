@@ -37,6 +37,13 @@ class DashboardScreen extends StatefulWidget {
   State<DashboardScreen> createState() => _DashboardScreenState();
 }
 
+// 1초 단위 전비 샘플링 데이터 모델
+class _DrivingSample {
+  final double powerKw;
+  final double estimatedSpeedKmh;
+  _DrivingSample(this.powerKw, this.estimatedSpeedKmh);
+}
+
 class _DashboardScreenState extends State<DashboardScreen> {
   bool _isCampingMode = false;
   static const double _batteryTotalKwh = 38.7;
@@ -57,7 +64,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
   double _batteryTemp = 30.0;    // 배터리 온도 (°C)
   int _soh = 94;                 // SOH (%)
   double _bmsDistance = 185.2;   // BMS 주행거리 (km)
-  double _efficiencyDist = 200.1;// 연비 주행거리 (km)
+  
+  // 3분 전비 및 효율 점수
+  final List<_DrivingSample> _recent3MinSamples = [];
+  double _recent3MinEfficiency = 5.7; // 기본값 5.7 km/kWh
+  int _efficiencyScore = 50;          // 0~100점
   
   // 누적 회생제동 회수량
   double _accumulatedRegenKwh = 0.0;
@@ -91,13 +102,63 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (mounted) {
         setState(() {
           _drivingSeconds++;
-          // 회생제동 중일 때 1초 단위 적분 누적 (주행 중 회생전력: kW * (1/3600)h)
+          // 회생제동 중일 때 1초 단위 적분 누적
           if (_current < -0.5 && _chargePowerKw > 0.1 && !_isCampingMode) {
             _accumulatedRegenKwh += (_chargePowerKw / 3600.0);
+          }
+
+          // 3분 실시간 전비 및 점수 계산
+          if (!_isCampingMode && _isConnected) {
+            _update3MinEfficiency();
           }
         });
       }
     });
+  }
+
+  // 3분 슬라이딩 윈도우 전비 및 점수 계산
+  void _update3MinEfficiency() {
+    double speed = 0.0;
+    if (_powerKw > 1.0) {
+      speed = (_powerKw * 4.5).clamp(10.0, 100.0);
+    }
+
+    _recent3MinSamples.add(_DrivingSample(_powerKw, speed));
+    if (_recent3MinSamples.length > 180) {
+      _recent3MinSamples.removeAt(0);
+    }
+
+    if (_recent3MinSamples.length >= 10) {
+      double totalNetKwh = 0.0;
+      double totalDistanceKm = 0.0;
+
+      for (var s in _recent3MinSamples) {
+        totalNetKwh += (s.powerKw / 3600.0);
+        totalDistanceKm += (s.estimatedSpeedKmh / 3600.0);
+      }
+
+      if (totalNetKwh > 0.005 && totalDistanceKm > 0.01) {
+        double calcEff = totalDistanceKm / totalNetKwh;
+        _recent3MinEfficiency = calcEff.clamp(2.0, 10.0);
+      }
+    }
+
+    // 3.7 ~ 7.7 km/kWh -> 0 ~ 100 점수 변환
+    double rawScore = ((_recent3MinEfficiency - 3.7) / (7.7 - 3.7)) * 100.0;
+    _efficiencyScore = rawScore.clamp(0.0, 100.0).round();
+
+    // 3분 전비 연동 주행거리
+    double currentRemainKwh = (_batteryTotalKwh * (_soh / 100.0)) * (_soc / 100.0);
+    _bmsDistance = double.parse((currentRemainKwh * _recent3MinEfficiency).toStringAsFixed(1));
+  }
+
+  // 🎨 전비 점수별 공통 테마 컬러
+  Color _getEfficiencyColor(int score) {
+    if (score >= 80) return const Color(0xFF00E676); // 극상: 네온 그린
+    if (score >= 60) return const Color(0xFF00E5FF); // 우수: 시안 블루
+    if (score >= 40) return const Color(0xFFFFD600); // 보통: 옐로우
+    if (score >= 20) return const Color(0xFFFF9100); // 주의: 오렌지
+    return const Color(0xFFFF5252);                   // 과소모: 레드
   }
 
   String _formatDrivingTime(int seconds) {
@@ -119,19 +180,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   Color _getPowerGaugeColor(double powerKw, double temp) {
     if (powerKw < 0) {
-      return const Color(0xFFFF9100); // 회생제동 (앰버 오렌지)
+      return const Color(0xFFFF9100); // 회생제동 (오렌지)
     }
     double limit = _getSafePowerLimitKw(temp);
     if (powerKw > limit) {
       return const Color(0xFFFF5252); // 과가속 경고 (빨강)
     } else if (powerKw > limit * 0.75) {
-      return const Color(0xFFFFB300); // 주의 구간 (주황/옐로우)
+      return const Color(0xFFFFB300); // 주의 구간 (주황)
     }
     return const Color(0xFF00E676);   // 정상 안전 주행 (네온 그린)
   }
 
   // ==========================================
-  // 🌡️ 마사다 배터리 온도별 급속충전 등급 및 컬러 평가
+  // 🌡️ 배터리 온도별 급속충전 등급 및 컬러 평가
   // ==========================================
   Map<String, dynamic> _getBatteryTempGrade() {
     double t = _batteryTemp;
@@ -151,7 +212,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
-  // 충전 테이퍼링 잔여시간 계산
   String _calculateChargeTimeToFull() {
     if (_chargePowerKw < 0.2) return "--";
     double currentSoc = _soc;
@@ -347,9 +407,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
       } else {
         _chargePowerKw = 0.0;
       }
-
-      _efficiencyDist = double.parse((_soc * 2.3).toStringAsFixed(1));
-      _bmsDistance = double.parse((_soc * 2.13).toStringAsFixed(1));
 
       if (mounted) setState(() {});
     } catch (_) {}
@@ -613,31 +670,71 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  // 💡 1 & 2. 좌측 패널 (전비 점수 색상 적용: 점수판 + BMS 주행거리)
   Widget _buildLeftPanel() {
+    Color effThemeColor = _getEfficiencyColor(_efficiencyScore);
+
     return Column(
       children: [
+        // 1. 실시간 주행 효율 점수판
         Expanded(
-          child: _buildCard(
-            title: "연비 주행거리 (2.3km/%)",
-            valueText: _efficiencyDist.toStringAsFixed(1),
-            unitText: "km",
-            valueColor: const Color(0xFF00E676),
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF13171D),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: const Color(0xFF222A35)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text("실시간 주행 효율 (3분)", style: TextStyle(color: Colors.white70, fontSize: 11)),
+                    Text(
+                      "${_recent3MinEfficiency.toStringAsFixed(1)} km/kWh",
+                      style: TextStyle(color: effThemeColor, fontSize: 10, fontWeight: FontWeight.bold),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  textBaseline: TextBaseline.alphabetic,
+                  children: [
+                    Text(
+                      "$_efficiencyScore",
+                      style: TextStyle(color: effThemeColor, fontSize: 26, fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(width: 4),
+                    const Text("점", style: TextStyle(color: Colors.white54, fontSize: 12)),
+                  ],
+                ),
+              ],
+            ),
           ),
         ),
         const SizedBox(height: 12),
+        // 2. BMS 주행가능거리 (전비 점수 색상 연동)
         Expanded(
           child: _buildCard(
-            title: "BMS 주행가능거리",
+            title: "BMS 주행가능거리 (3분 전비)",
             valueText: _bmsDistance.toStringAsFixed(1),
             unitText: "km",
-            valueColor: Colors.white,
+            valueColor: effThemeColor,
           ),
         ),
       ],
     );
   }
 
+  // 💡 3. 중앙 배터리 게이지 (전비 점수 색상 연동)
   Widget _buildCenterSocGauge() {
+    Color effThemeColor = _getEfficiencyColor(_efficiencyScore);
+
     return Container(
       decoration: BoxDecoration(
         color: const Color(0xFF13171D),
@@ -655,7 +752,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 value: _soc / 100.0,
                 strokeWidth: 14,
                 backgroundColor: const Color(0xFF222A35),
-                valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF00E676)),
+                valueColor: AlwaysStoppedAnimation<Color>(effThemeColor), // 🎨 전비 색상 연동
               ),
             ),
             Column(
@@ -670,9 +767,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   children: [
                     Text(
                       _soc.toStringAsFixed(1),
-                      style: const TextStyle(color: Color(0xFF00E676), fontSize: 34, fontWeight: FontWeight.bold),
+                      style: TextStyle(color: effThemeColor, fontSize: 34, fontWeight: FontWeight.bold), // 🎨 전비 색상 연동
                     ),
-                    const Text("%", style: TextStyle(color: Color(0xFF00E676), fontSize: 16, fontWeight: FontWeight.bold)),
+                    Text("%", style: TextStyle(color: effThemeColor, fontSize: 16, fontWeight: FontWeight.bold)),
                   ],
                 ),
               ],
@@ -817,7 +914,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Widget _buildPowerBar() {
     double normalized = ((_powerKw + 50) / 100).clamp(0.0, 1.0);
     double safeLimitKw = _getSafePowerLimitKw(_batteryTemp);
-    // 한계 눈금 위치 (-50kW ~ +50kW 범위에서 임계값의 비율)
     double limitNormalized = ((safeLimitKw + 50) / 100).clamp(0.0, 1.0);
     Color dynamicBarColor = _getPowerGaugeColor(_powerKw, _batteryTemp);
 
@@ -852,24 +948,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ],
           ),
           const SizedBox(height: 4),
-          // 파워 게이지 바 + 온도별 동적 한계선 인디케이터
           LayoutBuilder(
             builder: (context, constraints) {
               double barWidth = constraints.maxWidth;
-              double pinLeft = (barWidth * limitNormalized) - 3.0; // 핀 너비의 절반 보정
+              double pinLeft = (barWidth * limitNormalized) - 3.0;
 
               return Stack(
                 clipBehavior: Clip.none,
                 alignment: Alignment.centerLeft,
                 children: [
-                  // 실시간 파워 게이지 바
                   LinearProgressIndicator(
                     value: normalized,
                     backgroundColor: const Color(0xFF222A35),
                     valueColor: AlwaysStoppedAnimation<Color>(dynamicBarColor),
                     minHeight: 6,
                   ),
-                  // 중앙 0kW 기준선 눈금
                   Positioned(
                     left: (barWidth * 0.5) - 0.5,
                     child: Container(
@@ -878,7 +971,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       color: Colors.white30,
                     ),
                   ),
-                  // 📍 배터리 온도별 동적 안전 한계선 눈금 (붉은색 핀)
                   Positioned(
                     left: pinLeft.clamp(0.0, barWidth - 6.0),
                     child: Container(
@@ -973,7 +1065,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 ],
               ),
               const SizedBox(height: 3),
-              // 직관적인 5단계 온도 그라데이션 바
               Stack(
                 alignment: Alignment.centerLeft,
                 children: [
@@ -984,17 +1075,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       borderRadius: BorderRadius.circular(2),
                       gradient: const LinearGradient(
                         colors: [
-                          Color(0xFF2979FF), // 0도 이하 C등급 극저온 파랑
-                          Color(0xFF00E5FF), // 10~15도 A(저온) 하늘
-                          Color(0xFF00E676), // 15~45도 S등급 최적 초록
-                          Color(0xFFFFD600), // 45~48도 A(고온) 노랑
-                          Color(0xFFFF9100), // 48~54도 B등급 주황
-                          Color(0xFFFF5252), // 55도 이상 D등급 빨강
+                          Color(0xFF2979FF),
+                          Color(0xFF00E5FF),
+                          Color(0xFF00E676),
+                          Color(0xFFFFD600),
+                          Color(0xFFFF9100),
+                          Color(0xFFFF5252),
                         ],
                       ),
                     ),
                   ),
-                  // 현재 온도 인디케이터 핀 (-10도 ~ 60도)
                   Positioned(
                     left: (((_batteryTemp + 10) / 70.0).clamp(0.0, 1.0) * 84),
                     child: Container(
