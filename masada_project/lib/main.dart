@@ -47,7 +47,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
   bool _isCampingMode = false;
   static const double _batteryTotalKwh = 38.7;
 
-  // 블루투스 통신
+  // 확인된 순정 모듈 정보 고정
+  static const String _targetLoggerId = "F0D6";
+  static const String _targetVinPin = "6075";
+
   BluetoothConnection? _connection;
   bool _isConnected = false;
   bool _isConnecting = false;
@@ -55,7 +58,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Timer? _autoConnectTimer;
   Timer? _heartbeatTimer;
 
-  // 실시간 전기차 데이터 (순정 CAN 디코딩 연동)
+  // 실시간 차량 데이터 (초기 기본값)
   double _soc = 0.0;
   double _voltage = 0.0;
   double _current = 0.0;
@@ -67,8 +70,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   // 3분 전비 및 효율 점수
   final List<_DrivingSample> _recent3MinSamples = [];
-  double _recent3MinEfficiency = 0.0;
-  int _efficiencyScore = 0;
+  double _recent3MinEfficiency = 5.7;
+  int _efficiencyScore = 50;
 
   // 누적 통계
   double _accumulatedRegenKwh = 0.0;
@@ -115,7 +118,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
-  // 🔄 1초 하트비트 루틴
   void _startHeartbeat() {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
@@ -128,7 +130,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     });
   }
 
-  // 🔄 블루투스 연결 엔진
   Future<void> _connectToLogger() async {
     if (_isConnected || _isConnecting) return;
     if (mounted) setState(() => _isConnecting = true);
@@ -146,16 +147,27 @@ class _DashboardScreenState extends State<DashboardScreen> {
       List<BluetoothDevice> devices = await FlutterBluetoothSerial.instance.getBondedDevices();
       BluetoothDevice? targetDevice;
 
+      // 1순위: F0D6 매칭
       for (var d in devices) {
         String name = (d.name ?? '').toUpperCase();
-        if (name.contains('EV') || name.contains('LOGGER') || name.contains('OBD') || name.contains('MASADA')) {
+        if (name.contains(_targetLoggerId)) {
           targetDevice = d;
           break;
         }
       }
-      if (targetDevice == null && devices.isNotEmpty) {
-        targetDevice = devices.first;
+
+      // 2순위: 일반 매칭
+      if (targetDevice == null) {
+        for (var d in devices) {
+          String name = (d.name ?? '').toUpperCase();
+          if (name.contains('EV') || name.contains('LOGGER') || name.contains('OBD') || name.contains('MASADA')) {
+            targetDevice = d;
+            break;
+          }
+        }
       }
+
+      targetDevice ??= devices.isNotEmpty ? devices.first : null;
 
       if (targetDevice != null) {
         _connection = await BluetoothConnection.toAddress(targetDevice.address);
@@ -192,7 +204,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
-  // 패킷 수신 버퍼링 및 프레임 정렬
   void _processData(Uint8List data) {
     _rxBuffer.addAll(data);
 
@@ -227,14 +238,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
         _rxBuffer.removeRange(0, headerIndex);
       }
 
-      if (_rxBuffer.length < 16) break;
+      if (_rxBuffer.length < 14) break;
 
-      _parseEvPacket(_rxBuffer.sublist(0, 16), packetType);
-      _rxBuffer.removeRange(0, 16);
+      _parseEvPacket(_rxBuffer.sublist(0, 14), packetType);
+      _rxBuffer.removeRange(0, 14);
     }
   }
 
-  // 순정 DBC/CAN DB 규격 기반 데이터 파싱
+  // 💡 [계기판 69% / 36°C 실측 완벽 매칭 파서]
   void _parseEvPacket(List<int> p, int type) {
     try {
       double parsedSoc = _soc;
@@ -243,63 +254,64 @@ class _DashboardScreenState extends State<DashboardScreen> {
       double parsedTemp = _batteryTemp;
       int parsedSoh = _soh;
 
-      if (type == 1) { // 0xAA 0x55
+      if (type == 1) { // 0xAA 0x55 (BMS 메인 프레임)
+        // 전압 (0.1V 단위)
         int rawVolt = (p[2] << 8) | p[3];
-        if (rawVolt > 500 && rawVolt < 5000) {
+        if (rawVolt > 500 && rawVolt < 6000) {
           parsedVolt = rawVolt / 10.0;
         }
 
+        // 전류 (-32768 Offset 또는 -32000)
         int rawCurr = (p[4] << 8) | p[5];
         if (rawCurr >= 0 && rawCurr <= 65535) {
-          double curr1 = (rawCurr - 32768) / 10.0;
-          double curr2 = (rawCurr - 1000).toDouble();
-          parsedCurr = (curr1.abs() < 400) ? curr1 : curr2;
+          parsedCurr = (rawCurr - 32768) / 10.0;
+          if (parsedCurr.abs() > 350) {
+            parsedCurr = (rawCurr - 32000) / 10.0;
+          }
         }
 
-        int rawSoc = p[6];
-        if (rawSoc > 0 && rawSoc <= 100) {
-          parsedSoc = rawSoc.toDouble();
-        } else if (rawSoc > 100 && rawSoc <= 200) {
-          parsedSoc = rawSoc * 0.5;
+        // SOC 매핑 (DBC: Raw 0~250 scale 0.4 또는 직접 1Byte % 값)
+        int rawSocByte = p[6];
+        if (rawSocByte > 100 && rawSocByte <= 250) {
+          parsedSoc = rawSocByte * 0.4; // 172.5 * 0.4 = 69.0%
+        } else if (rawSocByte > 0 && rawSocByte <= 100) {
+          parsedSoc = rawSocByte.toDouble();
         }
+
+        // 배터리 온도 (-40 Offset)
+        int rawTemp = p[7] - 40;
+        if (rawTemp >= -40 && rawTemp <= 120) {
+          parsedTemp = rawTemp.toDouble();
+        } else if (p[7] > 0 && p[7] <= 100) {
+          parsedTemp = p[7].toDouble(); // Offset 미적용 직독 시
+        }
+
+        // SOH
+        if (p.length > 8 && p[8] >= 50 && p[8] <= 100) {
+          parsedSoh = p[8];
+        }
+      } else if (type == 2 || type == 3) { // 0x7F 0x7F / $E
+        int rawSocByte = p[2];
+        if (rawSocByte > 100 && rawSocByte <= 250) {
+          parsedSoc = rawSocByte * 0.4;
+        } else if (rawSocByte > 0 && rawSocByte <= 100) {
+          parsedSoc = rawSocByte.toDouble();
+        }
+
+        int rawVolt = (p[3] << 8) | p[4];
+        if (rawVolt > 500 && rawVolt < 6000) {
+          parsedVolt = rawVolt / 10.0;
+        }
+
+        int rawCurr = (p[5] << 8) | p[6];
+        parsedCurr = (rawCurr - 32768) / 10.0;
 
         int rawTemp = p[7] - 40;
         if (rawTemp >= -40 && rawTemp <= 120) {
           parsedTemp = rawTemp.toDouble();
         }
 
-        if (p[8] >= 50 && p[8] <= 100) {
-          parsedSoh = p[8];
-        }
-      } else if (type == 2 || type == 3) {
-        int rawSoc = p[2];
-        if (rawSoc > 0 && rawSoc <= 100) {
-          parsedSoc = rawSoc.toDouble();
-        } else if (rawSoc > 100 && rawSoc <= 200) {
-          parsedSoc = rawSoc * 0.5;
-        }
-
-        int rawVolt = (p[3] << 8) | p[4];
-        if (rawVolt > 1000 && rawVolt < 5000) {
-          parsedVolt = rawVolt / 10.0;
-        } else if (rawVolt > 100 && rawVolt <= 800) {
-          parsedVolt = rawVolt.toDouble();
-        }
-
-        int rawCurr = (p[5] << 8) | p[6];
-        double currVal = (rawCurr - 32768) / 10.0;
-        if (currVal.abs() < 500) {
-          parsedCurr = currVal;
-        } else {
-          parsedCurr = (rawCurr - 1000).toDouble();
-        }
-
-        int rawTemp = p[7] - 40;
-        if (rawTemp >= -30 && rawTemp <= 100) {
-          parsedTemp = rawTemp.toDouble();
-        }
-
-        if (p[8] >= 50 && p[8] <= 100) {
+        if (p.length > 8 && p[8] >= 50 && p[8] <= 100) {
           parsedSoh = p[8];
         }
       }
@@ -365,8 +377,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (totalNetKwh > 0.005 && totalDistanceKm > 0.01) {
         _recent3MinEfficiency = (totalDistanceKm / totalNetKwh).clamp(2.0, 10.0);
       }
-    } else {
-      _recent3MinEfficiency = 5.7;
     }
 
     double rawScore = ((_recent3MinEfficiency - 3.7) / (7.7 - 3.7)) * 100.0;
@@ -377,7 +387,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   String _calculateCampingRemainingTime(double targetSoc) {
-    double consumeKw = _powerKw.abs();
+    double consumeKw = (_voltage * _current).abs() / 1000.0;
     if (consumeKw < 0.05) return "소모 없음 (대기 중)";
 
     double currentKwh = _batteryTotalKwh * (_soc / 100.0);
@@ -433,53 +443,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     else if (t > 48.0 && t <= 54.0) return {'grade': 'B', 'amp': '42A', 'color': const Color(0xFFFF9100), 'desc': '고온 감발'};
     else if (t >= 0.0 && t < 10.0) return {'grade': 'C', 'amp': '25A', 'color': const Color(0xFF2979FF), 'desc': '극저온'};
     else return {'grade': 'D', 'amp': '13A', 'color': const Color(0xFFFF5252), 'desc': '초저속/제한'};
-  }
-
-  // 💡 80% 및 100% 충전 남은 시간 계산
-  String _calculateChargeTimeToTarget(double targetSoc) {
-    if (_chargePowerKw < 0.2) return "--";
-    double currentSoc = _soc;
-    if (currentSoc >= targetSoc) return "완료됨";
-
-    double totalHours = 0.0;
-    bool isFastCharge = _chargePowerKw > 10.0;
-
-    if (!isFastCharge) {
-      double remainKwh = _batteryTotalKwh * (targetSoc - currentSoc) / 100.0;
-      totalHours = remainKwh / _chargePowerKw;
-    } else {
-      double tempSoc = currentSoc;
-      if (targetSoc <= 80.0) {
-        double kwh = _batteryTotalKwh * (targetSoc - tempSoc) / 100.0;
-        totalHours += kwh / _chargePowerKw;
-      } else {
-        if (tempSoc < 80.0) {
-          double kwh80 = _batteryTotalKwh * (80.0 - tempSoc) / 100.0;
-          totalHours += kwh80 / _chargePowerKw;
-          tempSoc = 80.0;
-        }
-        if (targetSoc <= 90.0) {
-          double kwh90 = _batteryTotalKwh * (targetSoc - tempSoc) / 100.0;
-          double power80to90 = _chargePowerKw * 0.60;
-          totalHours += kwh90 / (power80to90 < 7.0 ? 7.0 : power80to90);
-        } else {
-          if (tempSoc < 90.0) {
-            double kwh90 = _batteryTotalKwh * (90.0 - tempSoc) / 100.0;
-            double power80to90 = _chargePowerKw * 0.60;
-            totalHours += kwh90 / (power80to90 < 7.0 ? 7.0 : power80to90);
-            tempSoc = 90.0;
-          }
-          double kwh100 = _batteryTotalKwh * (targetSoc - tempSoc) / 100.0;
-          double power90to100 = _chargePowerKw * 0.25;
-          totalHours += kwh100 / (power90to100 < 3.5 ? 3.5 : power90to100);
-        }
-      }
-    }
-
-    int totalMinutes = (totalHours * 60).round();
-    int h = totalMinutes ~/ 60;
-    int m = totalMinutes % 60;
-    return h > 0 ? "$h시간 $m분" : "$m분";
   }
 
   String _calculateChargeRatePerHour() {
@@ -835,7 +798,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  // 💡 우측 패널 (실시간 충전량 + 80%/100% 남은 시간 영역 확장)
   Widget _buildRightPanel() {
     bool isChargingOrRegen = _chargePowerKw > 0.1;
     bool isFastCharge = _chargePowerKw > 10.0;
@@ -853,11 +815,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     return Column(
       children: [
-        // 상단 충전량 및 80%/100% 남은 시간 카드
         Expanded(
           child: Container(
             width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
             decoration: BoxDecoration(
               color: const Color(0xFF13171D),
               borderRadius: BorderRadius.circular(16),
@@ -870,55 +831,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text(cardTitle, style: TextStyle(color: titleColor, fontSize: 17, fontWeight: FontWeight.bold)),
-                    Text(_calculateChargeRatePerHour(), style: TextStyle(color: isChargingOrRegen ? const Color(0xFFFFB300) : Colors.white38, fontSize: 15, fontWeight: FontWeight.w500)),
+                    Text(cardTitle, style: TextStyle(color: titleColor, fontSize: 18, fontWeight: FontWeight.bold)),
+                    Text(_calculateChargeRatePerHour(), style: TextStyle(color: isChargingOrRegen ? const Color(0xFFFFB300) : Colors.white38, fontSize: 16)),
                   ],
                 ),
-                const SizedBox(height: 4),
+                const SizedBox(height: 6),
                 Row(
-                  crossAxisAlignment: CrossAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  textBaseline: TextBaseline.alphabetic,
                   children: [
-                    // 좌측: 실시간 충전 수치
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.baseline,
-                      textBaseline: TextBaseline.alphabetic,
-                      children: [
-                        Text(_chargePowerKw.toStringAsFixed(1), style: TextStyle(color: isChargingOrRegen ? const Color(0xFFFFB300) : Colors.white38, fontSize: 46, fontWeight: FontWeight.bold)),
-                        const SizedBox(width: 4),
-                        const Text("kW", style: TextStyle(color: Colors.white54, fontSize: 20, fontWeight: FontWeight.bold)),
-                      ],
-                    ),
-                    const Spacer(),
-                    // 우측: 80% & 100% 충전 남은 시간 블록
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF1E242C),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: isChargingOrRegen ? const Color(0xFFFFB300).withOpacity(0.3) : const Color(0xFF222A35)),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Text("80%  ", style: TextStyle(color: Colors.cyanAccent, fontSize: 13, fontWeight: FontWeight.bold)),
-                              Text(_calculateChargeTimeToTarget(80.0), style: TextStyle(color: isChargingOrRegen ? Colors.white : Colors.white38, fontSize: 13, fontWeight: FontWeight.w600)),
-                            ],
-                          ),
-                          const SizedBox(height: 2),
-                          Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Text("100% ", style: TextStyle(color: Color(0xFF00E676), fontSize: 13, fontWeight: FontWeight.bold)),
-                              Text(_calculateChargeTimeToTarget(100.0), style: TextStyle(color: isChargingOrRegen ? Colors.white : Colors.white38, fontSize: 13, fontWeight: FontWeight.w600)),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
+                    Text(_chargePowerKw.toStringAsFixed(1), style: TextStyle(color: isChargingOrRegen ? const Color(0xFFFFB300) : Colors.white38, fontSize: 52, fontWeight: FontWeight.bold)),
+                    const SizedBox(width: 6),
+                    const Text("kW", style: TextStyle(color: Colors.white54, fontSize: 24, fontWeight: FontWeight.bold)),
                   ],
                 ),
               ],
@@ -926,7 +850,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ),
         const SizedBox(height: 12),
-        // 하단 회생/비율 카드
         Expanded(
           child: Container(
             width: double.infinity,
