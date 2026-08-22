@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -47,47 +48,40 @@ class _DashboardScreenState extends State<DashboardScreen> {
   bool _isCampingMode = false;
   static const double _batteryTotalKwh = 38.7;
 
-  // 통신 연결 객체
   BluetoothConnection? _connection;
   bool _isConnected = false;
   bool _isConnecting = false;
   final List<int> _rxBuffer = [];
+  String _asciiBuffer = "";
   Timer? _autoConnectTimer;
   Timer? _heartbeatTimer;
 
-  // 실시간 계기판 1:1 동기화 차량 데이터
-  double _soc = 66.0;
+  // 실시간 차량 데이터
+  double _soc = 64.0;
   double _voltage = 315.0;
   double _current = 0.0;
   double _powerKw = 0.0;
   double _chargePowerKw = 0.0;
-  double _batteryTemp = 43.0;
+  double _batteryTemp = 42.0;
   int _soh = 94;
   double _bmsDistance = 143.1;
 
-  // 배터리 팩 수분/침수 알림 상태 플래그
   bool _isWaterAlarm = false;
-
-  // 실제 계기판 수신 차속 및 거리 데이터
   double _realVehicleSpeedKmh = 0.0;
   double _accumulatedRealTripKm = 0.0;
   double _lastTripOdoKm = -1.0;
 
-  // 기어 위치 및 자동 캠핑모드 타이머 (0: N, 1: D, 2: R, 3: P)
   String _currentGear = "D";
   int _neutralDurationSeconds = 0;
 
-  // 셀 전압 및 밸런싱 데이터 (BMS_CellHVolt, BMS_CellLVolt)
   int _cellMaxMv = 3315;
   int _cellMinMv = 3300;
   int _cellDeltaMv = 15;
 
-  // 3분 전비 및 효율 점수
   final List<_DrivingSample> _recent3MinSamples = [];
   double _recent3MinEfficiency = 5.7;
   int _efficiencyScore = 50;
 
-  // 누적 통계
   double _accumulatedRegenKwh = 0.0;
   double _driveEnergyKwh = 0.0;
   double _hvacEnergyKwh = 0.0;
@@ -123,6 +117,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (_isConnected && _connection != null) {
         try {
           _connection!.output.add(Uint8List.fromList([0xAA, 0x55, 0x01, 0x00, 0x00, 0x00]));
+          _connection!.output.add(ascii.encode("AT\r\n"));
           _connection!.output.allSent;
         } catch (_) {}
       }
@@ -189,158 +184,202 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
-  // 💡 [CAN 버퍼 동기화 엔진: 13바이트 고정 슬라이싱]
+  // 💡 [바이너리 + ASCII 통합 파서]
   void _processData(Uint8List data) {
     _rxBuffer.addAll(data);
+    _asciiBuffer += String.fromCharCodes(data);
 
-    while (_rxBuffer.length >= 13) {
-      int headerIndex = -1;
+    // 1. ASCII 텍스트 패킷 파싱 (ELM327 / 텍스트 로거 지원)
+    if (_asciiBuffer.contains('\r') || _asciiBuffer.contains('\n')) {
+      List<String> lines = _asciiBuffer.split(RegExp(r'[\r\n]+'));
+      _asciiBuffer = lines.last;
+      for (int i = 0; i < lines.length - 1; i++) {
+        _parseAsciiLine(lines[i].trim());
+      }
+    }
 
-      for (int i = 0; i < _rxBuffer.length - 1; i++) {
-        if ((_rxBuffer[i] == 0xAA && _rxBuffer[i + 1] == 0x55) ||
-            (_rxBuffer[i] == 0x7F && _rxBuffer[i + 1] == 0x7F) ||
-            (_rxBuffer[i] == 0x24 && _rxBuffer[i + 1] == 0x45)) {
-          headerIndex = i;
+    // 2. 바이너리 스트림 슬라이딩 파싱 (0x0CFF / 0x18FF / 0x18FE 직접 검색)
+    if (_rxBuffer.length >= 12) {
+      for (int i = 0; i <= _rxBuffer.length - 12; i++) {
+        // 0x0CFF7D03 또는 0x0CFF7E03 탐색
+        if (_rxBuffer[i] == 0x0C && _rxBuffer[i + 1] == 0xFF) {
+          int idSub = _rxBuffer[i + 2];
+          List<int> d = _rxBuffer.sublist(i + 4, i + 12);
+
+          if (idSub == 0x7D) {
+            _decode0CFF7D(d);
+          } else if (idSub == 0x7E) {
+            _decode0CFF7E(d);
+          } else if (idSub == 0x81) {
+            _decode0CFF81(d);
+          }
+          _rxBuffer.removeRange(0, i + 12);
+          break;
+        }
+
+        // 0x18FFDC01 또는 0x18FF50E5 탐색
+        if (_rxBuffer[i] == 0x18 && _rxBuffer[i + 1] == 0xFF) {
+          int idSub = _rxBuffer[i + 2];
+          List<int> d = _rxBuffer.sublist(i + 4, i + 12);
+
+          if (idSub == 0xDC || idSub == 0x50) {
+            _decodeGear(d);
+          }
+          _rxBuffer.removeRange(0, i + 12);
+          break;
+        }
+
+        // 0x18FEDCD5 탐색 (속도)
+        if (_rxBuffer[i] == 0x18 && _rxBuffer[i + 1] == 0xFE && _rxBuffer[i + 2] == 0xDC) {
+          List<int> d = _rxBuffer.sublist(i + 4, i + 12);
+          _decodeSpeed(d);
+          _rxBuffer.removeRange(0, i + 12);
           break;
         }
       }
 
-      if (headerIndex == -1) {
-        if (_rxBuffer.length > 1) {
-          _rxBuffer.removeRange(0, _rxBuffer.length - 1);
-        }
-        break;
+      if (_rxBuffer.length > 512) {
+        _rxBuffer.removeRange(0, _rxBuffer.length - 128);
       }
-
-      if (headerIndex > 0) {
-        _rxBuffer.removeRange(0, headerIndex);
-      }
-
-      if (_rxBuffer.length < 13) break;
-
-      _parseDfskOfficialDbcFrame(_rxBuffer.sublist(0, 13));
-      _rxBuffer.removeRange(0, 13);
     }
   }
 
-  // 💡 [제공해주신 DBC & JSON 명세 100% 일치 파서]
-  void _parseDfskOfficialDbcFrame(List<int> frame) {
+  void _parseAsciiLine(String line) {
+    String clean = line.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '');
+    if (clean.length < 16) return;
+
     try {
-      int idB1 = frame[2];
-      int idB2 = frame[3];
-      int idB3 = frame[4];
-      List<int> d = frame.sublist(5, 13); // CAN Data[0..7]
-
-      // 1. BO_ 2365553923 BMS_VCU_0 (0x0CFF7D03)
-      // SG_ BMS_SOC : 8|8@1+ (0.5,0) -> Data[1] * 0.5
-      // SG_ BMS_CellHVolt : 24|16@1+ (0.001,0) -> Data[3..4]
-      // SG_ BMS_CellLVolt : 48|16@1+ (0.001,0) -> Data[6..7]
-      if (idB1 == 0x0C && idB2 == 0xFF && idB3 == 0x7D) {
-        int rawSoc = d[1];
-        if (rawSoc > 0 && rawSoc <= 200) {
-          _soc = rawSoc * 0.5; // 132 * 0.5 = 66.0%
+      if (clean.startsWith('0CFF7D03') || clean.contains('0CFF7D')) {
+        String dataHex = clean.substring(clean.indexOf('0CFF7D') + 8);
+        if (dataHex.length >= 16) {
+          List<int> d = _hexToBytes(dataHex.substring(0, 16));
+          _decode0CFF7D(d);
         }
-
-        int hVolt = (d[4] << 8) | d[3]; // Little-Endian (Intel)
-        if (hVolt < 2000 || hVolt > 4500) hVolt = (d[3] << 8) | d[4]; // Big-Endian Fallback
-        if (hVolt >= 2500 && hVolt <= 4200) _cellMaxMv = hVolt;
-
-        int lVolt = (d[7] << 8) | d[6];
-        if (lVolt < 2000 || lVolt > 4500) lVolt = (d[6] << 8) | d[7];
-        if (lVolt >= 2500 && lVolt <= 4200) _cellMinMv = lVolt;
-
-        _cellDeltaMv = (_cellMaxMv - _cellMinMv).clamp(0, 300);
-      }
-
-      // 2. BO_ 2365554179 BMS_VCU_1 (0x0CFF7E03)
-      // SG_ BMS_SOH : 8|8@1+ (1,0) -> Data[1]
-      // SG_ BMS_PackVolt : 16|16@1+ (1,0) -> Data[2..3]
-      // SG_ BMS_PackCurr : 32|16@1+ (1,-1000) -> Data[4..5] - 1000
-      // SG_ BMS_Htemp : 48|8@1+ (1,-40) -> Data[6] - 40
-      if (idB1 == 0x0C && idB2 == 0xFF && idB3 == 0x7E) {
-        int rawSoh = d[1];
-        if (rawSoh >= 50 && rawSoh <= 100) _soh = rawSoh;
-
-        int rawVolt = (d[3] << 8) | d[2];
-        if (rawVolt < 150 || rawVolt > 500) rawVolt = (d[2] << 8) | d[3];
-        if (rawVolt >= 200 && rawVolt <= 500) {
-          _voltage = rawVolt.toDouble(); // 315 V
-        } else if (rawVolt >= 2000 && rawVolt <= 5000) {
-          _voltage = rawVolt * 0.1;
+      } else if (clean.startsWith('0CFF7E03') || clean.contains('0CFF7E')) {
+        String dataHex = clean.substring(clean.indexOf('0CFF7E') + 8);
+        if (dataHex.length >= 16) {
+          List<int> d = _hexToBytes(dataHex.substring(0, 16));
+          _decode0CFF7E(d);
         }
-
-        int rawCurr = (d[5] << 8) | d[4];
-        if (rawCurr < 500 || rawCurr > 35000) rawCurr = (d[4] << 8) | d[5];
-        if (rawCurr >= 0 && rawCurr <= 65535) {
-          double calcCurr = (rawCurr - 1000).toDouble();
-          if (calcCurr.abs() > 300.0) calcCurr = (rawCurr - 32000) * 0.1;
-          if (calcCurr.abs() <= 300.0) _current = calcCurr;
+      } else if (clean.contains('18FFDC') || clean.contains('18FF50')) {
+        int idx = clean.contains('18FFDC') ? clean.indexOf('18FFDC') : clean.indexOf('18FF50');
+        String dataHex = clean.substring(idx + 8);
+        if (dataHex.length >= 16) {
+          List<int> d = _hexToBytes(dataHex.substring(0, 16));
+          _decodeGear(d);
         }
-
-        int rawTemp = d[6];
-        if (rawTemp >= 40 && rawTemp <= 140) {
-          _batteryTemp = (rawTemp - 40).toDouble(); // 83 - 40 = 43°C
-        } else if (rawTemp >= 0 && rawTemp <= 70) {
-          _batteryTemp = rawTemp.toDouble();
-        }
-
-        double calcPower = (_voltage * _current) / 1000.0;
-        if (calcPower.abs() > 70.0) calcPower = 0.0;
-        _powerKw = calcPower;
-
-        if (_current < -0.5) {
-          _chargePowerKw = calcPower.abs();
-        } else {
-          _chargePowerKw = 0.0;
+      } else if (clean.contains('18FEDC')) {
+        String dataHex = clean.substring(clean.indexOf('18FEDC') + 8);
+        if (dataHex.length >= 16) {
+          List<int> d = _hexToBytes(dataHex.substring(0, 16));
+          _decodeSpeed(d);
         }
       }
-
-      // 3. BO_ 2566904833 VCU_Meter (0x18FF50E5 / 0x18FFDC01)
-      // SG_ Gear : 34|2@1+ (1,0) -> Data[4], bit 2..3 (0: N, 1: D, 2: R, 3: P)
-      if ((idB1 == 0x18 && idB2 == 0xFF && (idB3 == 0x50 || idB3 == 0xDC)) ||
-          (idB1 == 0x25 && idB2 == 0x66)) {
-        int rawGear = (d[4] >> 2) & 0x03;
-        if (rawGear == 0) {
-          _currentGear = "N";
-        } else if (rawGear == 1) {
-          _currentGear = "D";
-        } else if (rawGear == 2) {
-          _currentGear = "R";
-        } else if (rawGear == 3) {
-          _currentGear = "P";
-        }
-
-        if (_currentGear == "D" && _isCampingMode) {
-          _isCampingMode = false;
-          _neutralDurationSeconds = 0;
-        }
-      }
-
-      // 4. BO_ 2566839509 Meter_VCU_1 (0x18FEDCD5)
-      // SG_ Speed : 0|8@1+ (1,0) -> Data[0]
-      // SG_ Distance : 8|32@1+ (1,0) -> Data[1..4]
-      if (idB1 == 0x18 && idB2 == 0xFE && idB3 == 0xDC) {
-        _realVehicleSpeedKmh = d[0].toDouble();
-
-        int rawDist = (d[4] << 24) | (d[3] << 16) | (d[2] << 8) | d[1];
-        if (rawDist < 0 || rawDist > 2000000) rawDist = (d[1] << 24) | (d[2] << 16) | (d[3] << 8) | d[4];
-        if (rawDist > 1000 && rawDist < 2000000) {
-          double odoKm = rawDist.toDouble();
-          if (_lastTripOdoKm >= 0 && odoKm >= _lastTripOdoKm && (odoKm - _lastTripOdoKm) < 5.0) {
-            _accumulatedRealTripKm += (odoKm - _lastTripOdoKm);
-          }
-          _lastTripOdoKm = odoKm;
-        }
-      }
-
-      // 5. BO_ 2365554947 BMS_VCU_4 (0x0CFF8103)
-      // SG_ BMS_MoisSensorFlt : 48|1@1+ -> 수분/침수 센서 비트
-      if (idB1 == 0x0C && idB2 == 0xFF && idB3 == 0x81) {
-        _isWaterAlarm = (d[6] & 0x01) != 0;
-      }
-
-      if (mounted) setState(() {});
     } catch (_) {}
+  }
+
+  List<int> _hexToBytes(String hex) {
+    List<int> bytes = [];
+    for (int i = 0; i < hex.length - 1; i += 2) {
+      bytes.add(int.parse(hex.substring(i, i + 2), radix: 16));
+    }
+    return bytes;
+  }
+
+  // 💡 [0x0CFF7D03 디코더: BMS_SOC, BMS_CellHVolt, BMS_CellLVolt]
+  void _decode0CFF7D(List<int> d) {
+    if (d.length < 8) return;
+    int rawSoc = d[1];
+    if (rawSoc > 0 && rawSoc <= 200) {
+      _soc = rawSoc * 0.5;
+    }
+
+    int hVolt = (d[4] << 8) | d[3];
+    if (hVolt < 2000 || hVolt > 4500) hVolt = (d[3] << 8) | d[4];
+    if (hVolt >= 2500 && hVolt <= 4200) _cellMaxMv = hVolt;
+
+    int lVolt = (d[7] << 8) | d[6];
+    if (lVolt < 2000 || lVolt > 4500) lVolt = (d[6] << 8) | d[7];
+    if (lVolt >= 2500 && lVolt <= 4200) _cellMinMv = lVolt;
+
+    _cellDeltaMv = (_cellMaxMv - _cellMinMv).clamp(0, 300);
+    if (mounted) setState(() {});
+  }
+
+  // 💡 [0x0CFF7E03 디코더: SOH, PackVolt, PackCurr, HTemp]
+  void _decode0CFF7E(List<int> d) {
+    if (d.length < 8) return;
+    int rawSoh = d[1];
+    if (rawSoh >= 50 && rawSoh <= 100) _soh = rawSoh;
+
+    int rawVolt = (d[3] << 8) | d[2];
+    if (rawVolt < 150 || rawVolt > 500) rawVolt = (d[2] << 8) | d[3];
+    if (rawVolt >= 200 && rawVolt <= 500) {
+      _voltage = rawVolt.toDouble();
+    } else if (rawVolt >= 2000 && rawVolt <= 5000) {
+      _voltage = rawVolt * 0.1;
+    }
+
+    int rawCurr = (d[5] << 8) | d[4];
+    if (rawCurr < 500 || rawCurr > 35000) rawCurr = (d[4] << 8) | d[5];
+    if (rawCurr >= 0 && rawCurr <= 65535) {
+      double calcCurr = (rawCurr - 1000).toDouble();
+      if (calcCurr.abs() > 300.0) calcCurr = (rawCurr - 32000) * 0.1;
+      if (calcCurr.abs() <= 300.0) _current = calcCurr;
+    }
+
+    int rawTemp = d[6];
+    if (rawTemp >= 40 && rawTemp <= 140) {
+      _batteryTemp = (rawTemp - 40).toDouble();
+    } else if (rawTemp >= 0 && rawTemp <= 70) {
+      _batteryTemp = rawTemp.toDouble();
+    }
+
+    double calcPower = (_voltage * _current) / 1000.0;
+    if (calcPower.abs() > 70.0) calcPower = 0.0;
+    _powerKw = calcPower;
+
+    if (_current < -0.5) {
+      _chargePowerKw = calcPower.abs();
+    } else {
+      _chargePowerKw = 0.0;
+    }
+    if (mounted) setState(() {});
+  }
+
+  // 💡 [기어 디코더: 18FFDC01 / 18FF50E5 (0: N, 1: D, 2: R, 3: P)]
+  void _decodeGear(List<int> d) {
+    if (d.length < 5) return;
+    int rawGear = (d[4] >> 2) & 0x03;
+    if (rawGear == 0) {
+      _currentGear = "N";
+    } else if (rawGear == 1) {
+      _currentGear = "D";
+    } else if (rawGear == 2) {
+      _currentGear = "R";
+    } else if (rawGear == 3) {
+      _currentGear = "P";
+    }
+
+    if (_currentGear == "D" && _isCampingMode) {
+      _isCampingMode = false;
+      _neutralDurationSeconds = 0;
+    }
+    if (mounted) setState(() {});
+  }
+
+  // 💡 [속도 디코더: 18FEDCD5]
+  void _decodeSpeed(List<int> d) {
+    if (d.isEmpty) return;
+    _realVehicleSpeedKmh = d[0].toDouble();
+    if (mounted) setState(() {});
+  }
+
+  // 💡 [수분 센서 장애 디코더: 0x0CFF8103]
+  void _decode0CFF81(List<int> d) {
+    if (d.length < 7) return;
+    _isWaterAlarm = (d[6] & 0x01) != 0;
+    if (mounted) setState(() {});
   }
 
   void _startDrivingTimer() {
