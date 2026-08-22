@@ -80,13 +80,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
   double _evapTemp = 15.0;
   double _envTemp = 25.0;
 
-  // 💡 [배터리 평생 통계 & 관리 데이터]
-  double _totalCumulativeChargeKwh = 0.0; // 출고 후 누적 충전량 (kWh)
-  double _totalRegenEnergyKwh = 0.0;       // 출고 후 누적 회생 발전량 (kWh)
-  double _totalDischargeEnergyKwh = 0.0;   // 출고 후 누적 방전 사용량 (kWh)
-  int _chargeTimesCount = 0;              // 누적 완충 횟수
-  int _dischargeTimesCount = 0;           // 과방전 횟수
-  
+  // 배터리 평생 통계 & 관리 데이터
+  double _totalCumulativeChargeKwh = 0.0;
+  double _totalRegenEnergyKwh = 0.0;
+  double _totalDischargeEnergyKwh = 0.0;
+  int _chargeTimesCount = 0;
+  int _dischargeTimesCount = 0;
+
   // 고전압 릴레이 4종 수명 카운터
   int _rlyPreChgCount = 0;
   int _rlyMainPosCount = 0;
@@ -276,7 +276,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   bool _dispatchCanMessage(int id, List<int> d) {
     if (d.length < 8) return false;
 
-    // 1. BMS_VCU_0 (0x0CFF7D03)[span_20](start_span)[span_20](end_span)[span_21](start_span)[span_21](end_span)
+    // 1. BMS_VCU_0 (0x0CFF7D03)
     if (id == 0x0CFF7D03) {
       int rawSoc = d[1];
       if (rawSoc > 0 && rawSoc <= 200) {
@@ -293,7 +293,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 2. BMS_VCU_1 (0x0CFF7E03)[span_22](start_span)[span_22](end_span)[span_23](start_span)[span_23](end_span)
+    // 2. BMS_VCU_1 (0x0CFF7E03)
     if (id == 0x0CFF7E03) {
       int rawSoh = d[1];
       if (rawSoh >= 50 && rawSoh <= 100) _soh = rawSoh;
@@ -327,14 +327,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 3. BMS_VCU_2 (0x0CFF7F03): 절연저항[span_24](start_span)[span_24](end_span)[span_25](start_span)[span_25](end_span)
+    // 3. BMS_VCU_2 (0x0CFF7F03): 절연저항
     if (id == 0x0CFF7F03) {
       _insulationResistanceKohm = ((d[7] << 8) | d[6]) * 10;
       if (mounted) setState(() {});
       return true;
     }
 
-    // 4. VCU_Meter (0x19014801 / 0x18FF50E5 / 0x18FFDC01)[span_26](start_span)[span_26](end_span)[span_27](start_span)[span_27](end_span)
+    // 4. VCU_Meter (0x19014801 / 0x18FF50E5 / 0x18FFDC01)
     if (id == 0x19014801 || id == 0x18FF50E5 || id == 0x18FFDC01 || id == 0x09014801) {
       int rawGear = (d[4] >> 2) & 0x03;
       if (rawGear == 0) _currentGear = "N";
@@ -370,7 +370,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 5. Meter_VCU_1 (0x190048D5 / 0x18FEDCD5)[span_28](start_span)[span_28](end_span)[span_29](start_span)[span_29](end_span)
+    // 5. Meter_VCU_1 (0x190048D5 / 0x18FEDCD5)
     if (id == 0x190048D5 || id == 0x18FEDCD5 || id == 0x090048D5) {
       _realVehicleSpeedKmh = d[0].toDouble();
 
@@ -386,7 +386,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 6. BMS_VCU_4 (0x0CFF8103): 수분센서 & DC/Pack 스위치[span_30](start_span)[span_30](end_span)[span_31](start_span)[span_31](end_span)
+    // 6. BMS_VCU_4 (0x0CFF8103): 수분센서 & DC/Pack 스위치
     if (id == 0x0CFF8103) {
       _isWaterAlarm = (d[6] & 0x01) != 0;
       _isDcSwitchClosed = (d[6] & 0x04) != 0;
@@ -395,7 +395,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 7. BMS_VCU_3 (0x0CFF8003): 완충 횟수 및 과방전 횟수[span_32](start_span)[span_32](end_span)[span_33](start_span)[span_33](end_span)
+    // 7. BMS_VCU_3 (0x0CFF8003): 완충 횟수 및 과방전 횟수
     if (id == 0x0CFF8003) {
       _chargeTimesCount = (d[3] << 8) | d[2];
       _dischargeTimesCount = (d[5] << 8) | d[4];
@@ -403,7 +403,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 8. BMS_VCU_7_1 (0x0CFF8503): 평생 누적 충전량[span_34](start_span)[span_34](end_span)[span_35](start_span)[span_35](end_span)
+    // 8. BMS_VCU_7_1 (0x0CFF8503): 평생 누적 충전량
     if (id == 0x0CFF8503 || id == 0x0CFF8501) {
       int rawCumul = (d[5] << 24) | (d[4] << 16) | (d[3] << 8) | d[2];
       if (rawCumul > 0) {
@@ -413,7 +413,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 9. BMS_VCU_T37_CumulativeEnergy (0x2365563651): 누적 회생 및 누적 방전량[span_36](start_span)[span_36](end_span)
+    // 9. BMS_VCU_T37_CumulativeEnergy (0x2365563651): 누적 회생 및 누적 방전량
     if (id == 0x2365563651 || id == 0x0CFF8703) {
       int rawRegen = (d[3] << 24) | (d[2] << 16) | (d[1] << 8) | d[0];
       int rawDchg = (d[7] << 24) | (d[6] << 16) | (d[5] << 8) | d[4];
@@ -423,7 +423,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 10. BMS_VCU_T38_HvRelayOpCount (0x2365563907): 릴레이 4종 수명 카운터[span_37](start_span)[span_37](end_span)
+    // 10. BMS_VCU_T38_HvRelayOpCount (0x2365563907): 릴레이 4종 수명 카운터
     if (id == 0x2365563907 || id == 0x0CFF8B03) {
       _rlyPreChgCount = (d[1] << 8) | d[0];
       _rlyMainNegCount = (d[3] << 8) | d[2];
@@ -433,7 +433,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 11. BMS_VCU_T39_CellDcIR (0x2365564163): 셀 내부저항[span_38](start_span)[span_38](end_span)
+    // 11. BMS_VCU_T39_CellDcIR (0x2365564163): 셀 내부저항
     if (id == 0x2365564163 || id == 0x0CFF8C03) {
       _cellDcIrMax = ((d[1] << 8) | d[0]) * 0.1;
       _cellDcIrMin = ((d[3] << 8) | d[2]) * 0.1;
@@ -441,7 +441,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 12. SOC 구간별 충전 횟수 (T33, T34, T35)[span_39](start_span)[span_39](end_span)
+    // 12. SOC 구간별 충전 횟수 (T33, T34, T35)
     if (id == 0x0CFF8803 || id == 0x2365562627) {
       _socChargeCounts[0] = (d[1] << 8) | d[0];
       _socChargeCounts[1] = (d[3] << 8) | d[2];
@@ -631,7 +631,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Color _getPowerGaugeColor(double powerKw, double temp) {
-    if (powerKw < 0) return const Color(0xFFFF9100);
+    if (powerKw < 0) return const Color(0xFF00E5FF);
     double limit = _getSafePowerLimitKw(temp);
     if (powerKw > limit) return const Color(0xFFFF5252);
     else if (powerKw > limit * 0.75) return const Color(0xFFFFB300);
@@ -690,7 +690,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
-  // 💡 [배터리 관리 & 평생 이력 전문 다이얼로그]
+  // 배터리 관리 & 평생 이력 전문 다이얼로그
   void _showBatteryManagementDialog() {
     int maxChgCnt = _socChargeCounts.reduce((a, b) => a > b ? a : b);
     if (maxChgCnt == 0) maxChgCnt = 1;
@@ -735,7 +735,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   ),
                   const Divider(color: Colors.white12, height: 12),
                   
-                  // 1. 평생 누적 에너지 통계[span_40](start_span)[span_40](end_span)[span_41](start_span)[span_41](end_span)
+                  // 1. 평생 누적 에너지 통계
                   const Text("🔋 평생 누적 에너지 통계 (출고 후 영구 기록)", style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
                   const SizedBox(height: 6),
                   Row(
@@ -751,11 +751,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   ),
                   const SizedBox(height: 12),
 
-                  // 2. 고전압 릴레이 수명 카운터 & 안전 절연 상태[span_42](start_span)[span_42](end_span)[span_43](start_span)[span_43](end_span)
+                  // 2. 고전압 릴레이 수명 카운터 & 안전 절연 상태
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // 좌측: 고전압 릴레이 수명 카운터[span_44](start_span)[span_44](end_span)
                       Expanded(
                         flex: 50,
                         child: Column(
@@ -782,7 +781,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         ),
                       ),
                       const SizedBox(width: 10),
-                      // 우측: 절연저항 및 셀 상세[span_45](start_span)[span_45](end_span)[span_46](start_span)[span_46](end_span)
                       Expanded(
                         flex: 50,
                         child: Column(
@@ -812,7 +810,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   ),
                   const SizedBox(height: 12),
 
-                  // 3. SOC 구간별 충전 히스토그램[span_47](start_span)[span_47](end_span)
+                  // 3. SOC 구간별 충전 히스토그램
                   const Text("📊 SOC 구간별 누적 충전 빈도 패턴", style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
                   const SizedBox(height: 6),
                   Container(
@@ -972,7 +970,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
         ),
         Row(
           children: [
-            // [배터리 관리] 옵션 버튼
             GestureDetector(
               onTap: _showBatteryManagementDialog,
               child: Container(
@@ -1560,7 +1557,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text("회생 ${regenKw.toStringAsFixed(1)}kW", style: TextStyle(color: regenKw > 0.1 ? const Color(0xFFFF9100) : Colors.white54, fontSize: 17, fontWeight: FontWeight.bold)),
+                    Text("회생 ${regenKw.toStringAsFixed(1)}kW", style: TextStyle(color: regenKw > 0.1 ? const Color(0xFF00E5FF) : Colors.white54, fontSize: 17, fontWeight: FontWeight.bold)),
                     Text("+${regenPct.toStringAsFixed(1)}%", style: const TextStyle(color: Color(0xFF00E676), fontSize: 17, fontWeight: FontWeight.bold)),
                     Text("+${gainedKm.toStringAsFixed(1)}km 이득", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 17, fontWeight: FontWeight.bold)),
                   ],
@@ -1624,12 +1621,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  // 중앙 0kW 영점 분할 파워바 (좌: 사이언 회생, 우: 가속출력)
   Widget _buildPowerBar() {
-    double normalized = ((_powerKw + 50) / 100).clamp(0.0, 1.0);
     double safeLimitKw = _getSafePowerLimitKw(_batteryTemp);
-    double limitNormalized = ((safeLimitKw + 50) / 100).clamp(0.0, 1.0);
     Color dynamicBarColor = _getPowerGaugeColor(_powerKw, _batteryTemp);
-
     bool isRegenLimited = (_soc >= 90.5) || (_batteryTemp < 5.0);
 
     return Container(
@@ -1646,7 +1641,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             children: [
               Row(
                 children: [
-                  const Text("◀ 회생제동 (REGEN)", style: TextStyle(color: Color(0xFFFF9100), fontSize: 13, fontWeight: FontWeight.bold)),
+                  const Text("◀ 회생제동 (REGEN)", style: TextStyle(color: Color(0xFF00E5FF), fontSize: 13, fontWeight: FontWeight.bold)),
                   if (isRegenLimited) ...[
                     const SizedBox(width: 6),
                     Container(
@@ -1664,7 +1659,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text("실시간: ${_powerKw.toStringAsFixed(1)} kW", style: TextStyle(color: dynamicBarColor, fontSize: 15, fontWeight: FontWeight.bold)),
+                  Text("실시간: ${_powerKw.toStringAsFixed(1)} kW", style: TextStyle(color: _powerKw < -0.1 ? const Color(0xFF00E5FF) : dynamicBarColor, fontSize: 15, fontWeight: FontWeight.bold)),
                   const SizedBox(width: 6),
                   Text("(한계: ${safeLimitKw.toStringAsFixed(0)}kW)", style: const TextStyle(color: Colors.white38, fontSize: 13)),
                 ],
@@ -1676,22 +1671,69 @@ class _DashboardScreenState extends State<DashboardScreen> {
           LayoutBuilder(
             builder: (context, constraints) {
               double barWidth = constraints.maxWidth;
-              double pinLeft = (barWidth * limitNormalized) - 4.0;
+              double halfWidth = barWidth / 2.0;
+
+              double powerMagnitude = _powerKw.abs().clamp(0.0, 50.0);
+              double fillWidth = (powerMagnitude / 50.0) * halfWidth;
+
+              double limitNormalized = (safeLimitKw / 50.0).clamp(0.0, 1.0);
+              double pinLeft = halfWidth + (halfWidth * limitNormalized) - 4.0;
+
               return Stack(
                 clipBehavior: Clip.none,
                 alignment: Alignment.centerLeft,
                 children: [
-                  LinearProgressIndicator(value: normalized, backgroundColor: const Color(0xFF222A35), valueColor: AlwaysStoppedAnimation<Color>(dynamicBarColor), minHeight: 12),
-                  Positioned(left: (barWidth * 0.5) - 1.0, child: Container(width: 2.0, height: 16, color: Colors.white54)),
+                  Container(
+                    width: barWidth,
+                    height: 12,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF222A35),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                  ),
+                  if (_powerKw < -0.1)
+                    Positioned(
+                      right: halfWidth,
+                      child: Container(
+                        width: fillWidth,
+                        height: 12,
+                        decoration: const BoxDecoration(
+                          color: Color(0xFF00E5FF),
+                          borderRadius: BorderRadius.horizontal(left: Radius.circular(6)),
+                        ),
+                      ),
+                    )
+                  else if (_powerKw > 0.1)
+                    Positioned(
+                      left: halfWidth,
+                      child: Container(
+                        width: fillWidth,
+                        height: 12,
+                        decoration: BoxDecoration(
+                          color: dynamicBarColor,
+                          borderRadius: const BorderRadius.horizontal(right: Radius.circular(6)),
+                        ),
+                      ),
+                    ),
                   Positioned(
-                    left: pinLeft.clamp(0.0, barWidth - 8.0),
+                    left: halfWidth - 1.0,
+                    child: Container(
+                      width: 2.0,
+                      height: 16,
+                      color: Colors.white70,
+                    ),
+                  ),
+                  Positioned(
+                    left: pinLeft.clamp(halfWidth, barWidth - 8.0),
                     child: Container(
                       width: 8,
                       height: 18,
                       decoration: BoxDecoration(
                         color: Colors.redAccent,
                         borderRadius: BorderRadius.circular(2.0),
-                        boxShadow: const [BoxShadow(color: Colors.black87, blurRadius: 3, offset: Offset(0, 1))],
+                        boxShadow: const [
+                          BoxShadow(color: Colors.black87, blurRadius: 3, offset: Offset(0, 1)),
+                        ],
                       ),
                     ),
                   ),
