@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -46,6 +47,7 @@ class DashboardScreen extends StatefulWidget {
 
 class _DashboardScreenState extends State<DashboardScreen> {
   bool _isCampingMode = false;
+  int _currentThemeIndex = 0; // 0: 테마 A (클래식 가로형), 1: 테마 B (운전자 집중 세로형)
   static const double _batteryTotalKwh = 38.7;
 
   BluetoothConnection? _connection;
@@ -112,6 +114,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   void initState() {
     super.initState();
+    _loadSavedTheme();
     _startDrivingTimer();
     _connectToLogger();
     _autoConnectTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
@@ -128,6 +131,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _drivingTimer?.cancel();
     _connection?.dispose();
     super.dispose();
+  }
+
+  // 영구 저장된 테마 불러오기
+  Future<void> _loadSavedTheme() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _currentThemeIndex = prefs.getInt('saved_dashboard_theme') ?? 0;
+    });
+  }
+
+  // 선택한 테마 영구 저장
+  Future<void> _toggleTheme() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _currentThemeIndex = (_currentThemeIndex == 0) ? 1 : 0;
+    });
+    await prefs.setInt('saved_dashboard_theme', _currentThemeIndex);
   }
 
   void _startHeartbeat() {
@@ -729,8 +749,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
               _buildHeader(),
               const SizedBox(height: 4),
               Expanded(
-                child: _isCampingMode ? _buildCampingDashboard() : _buildDriverFocusedDashboard(),
+                child: _isCampingMode
+                    ? _buildCampingDashboard()
+                    : (_currentThemeIndex == 0
+                        ? _buildThemeAStandardDashboard()
+                        : _buildThemeBDriverDashboard()),
               ),
+              if (!_isCampingMode && _currentThemeIndex == 0) ...[
+                const SizedBox(height: 4),
+                _buildThemeAPowerBar(),
+              ],
               const SizedBox(height: 4),
               _buildBottomStatusBar(),
               const SizedBox(height: 4),
@@ -778,7 +806,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 ),
               ),
             const SizedBox(width: 8),
-            // 💡 [수정]: 기어 상태를 작고 컴팩트하게 축소
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
               decoration: BoxDecoration(
@@ -799,6 +826,29 @@ class _DashboardScreenState extends State<DashboardScreen> {
         ),
         Row(
           children: [
+            // 💡 [테마 전환 버튼: 테마 A / 테마 B 영구 저장 연동]
+            GestureDetector(
+              onTap: _toggleTheme,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1E242C),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.purpleAccent.withOpacity(0.8), width: 1.0),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.palette_outlined, color: Colors.purpleAccent, size: 14),
+                    const SizedBox(width: 4),
+                    Text(
+                      _currentThemeIndex == 0 ? "테마 A (가로)" : "테마 B (세로)",
+                      style: const TextStyle(color: Colors.purpleAccent, fontSize: 12, fontWeight: FontWeight.bold),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
             GestureDetector(
               onTap: _showBatteryManagementDialog,
               child: Container(
@@ -886,7 +936,545 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  Widget _buildDriverFocusedDashboard() {
+  // =========================================================================
+  // [테마 A: 클래식 가로형 레이아웃]
+  // =========================================================================
+  Widget _buildThemeAStandardDashboard() {
+    return Row(
+      children: [
+        Expanded(flex: 25, child: _buildThemeALeftPanel()),
+        const SizedBox(width: 10),
+        Expanded(flex: 50, child: _buildThemeACenterSocGauge()),
+        const SizedBox(width: 10),
+        Expanded(flex: 25, child: _buildThemeARightPanel()),
+      ],
+    );
+  }
+
+  Widget _buildThemeALeftPanel() {
+    Color effThemeColor = _getEfficiencyColor(_efficiencyScore);
+    Map<String, int> fuelCosts = _calculateDetailedFuelCosts();
+
+    return Column(
+      children: [
+        Expanded(
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF13171D),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: const Color(0xFF222A35)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text("💰 실시간 유류비 절감", style: TextStyle(color: Colors.white70, fontSize: 15, fontWeight: FontWeight.w500)),
+                    Text("카니발 대비", style: TextStyle(color: Colors.white38, fontSize: 11)),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  textBaseline: TextBaseline.alphabetic,
+                  children: [
+                    Text("+${fuelCosts['saved']}", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 38, fontWeight: FontWeight.bold)),
+                    const SizedBox(width: 4),
+                    const Text("원 절약", style: TextStyle(color: Colors.white70, fontSize: 16, fontWeight: FontWeight.bold)),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text("카니발: ${fuelCosts['carnival']}원", style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                    Text("마사다: ${fuelCosts['masada']}원", style: const TextStyle(color: Color(0xFFFFB300), fontSize: 12, fontWeight: FontWeight.bold)),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 10),
+        Expanded(
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF13171D),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: const Color(0xFF222A35)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Text("BMS 주행가능거리 (복합 전비)", style: TextStyle(color: Colors.white70, fontSize: 16, fontWeight: FontWeight.w500)),
+                const SizedBox(height: 4),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  textBaseline: TextBaseline.alphabetic,
+                  children: [
+                    Text(_bmsDistance.toStringAsFixed(1), style: TextStyle(color: effThemeColor, fontSize: 46, fontWeight: FontWeight.bold)),
+                    const SizedBox(width: 6),
+                    const Text("km", style: TextStyle(color: Colors.white54, fontSize: 22, fontWeight: FontWeight.bold)),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildThemeACenterSocGauge() {
+    Color effThemeColor = _getEfficiencyColor(_efficiencyScore);
+    double accelRatio = (_accelPedalPct / 100.0).clamp(0.0, 1.0);
+    double ptcRatio = ((_ptcTemp - 15.0) / 65.0).clamp(0.0, 1.0);
+    double acRatio = ((25.0 - _evapTemp) / 25.0).clamp(0.0, 1.0);
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFF13171D),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFF222A35)),
+      ),
+      child: Stack(
+        children: [
+          Align(
+            alignment: Alignment.topCenter,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1E242C),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.white24, width: 0.8),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.thermostat_outlined, color: Colors.orangeAccent, size: 14),
+                  const SizedBox(width: 4),
+                  Text(
+                    "외기온도 ${_envTemp.toStringAsFixed(1)}°C",
+                    style: const TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          Row(
+            children: [
+              Expanded(
+                flex: 15,
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Text("ACCEL", style: TextStyle(color: Colors.white54, fontSize: 11, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 2),
+                    Text("$_accelPedalPct%", style: const TextStyle(color: Color(0xFF00E676), fontSize: 13, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 6),
+                    Expanded(
+                      child: Container(
+                        width: 14,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF222A35),
+                          borderRadius: BorderRadius.circular(7),
+                        ),
+                        child: LayoutBuilder(
+                          builder: (context, constraints) {
+                            return Align(
+                              alignment: Alignment.bottomCenter,
+                              child: Container(
+                                width: 14,
+                                height: constraints.maxHeight * accelRatio,
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF00E676),
+                                  borderRadius: BorderRadius.circular(7),
+                                  boxShadow: const [
+                                    BoxShadow(color: Color(0xFF00E676), blurRadius: 4, spreadRadius: 1),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    const Text("0%", style: TextStyle(color: Colors.white30, fontSize: 10)),
+                  ],
+                ),
+              ),
+              Expanded(
+                flex: 70,
+                child: Center(
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      SizedBox(
+                        width: 250,
+                        height: 250,
+                        child: CircularProgressIndicator(
+                          value: (_soc / 100.0).clamp(0.0, 1.0),
+                          strokeWidth: 20,
+                          backgroundColor: const Color(0xFF222A35),
+                          valueColor: AlwaysStoppedAnimation<Color>(effThemeColor),
+                        ),
+                      ),
+                      Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const SizedBox(height: 10),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.baseline,
+                            textBaseline: TextBaseline.alphabetic,
+                            children: [
+                              Text(_pureDriveTripEfficiency.toStringAsFixed(1), style: TextStyle(color: effThemeColor, fontSize: 26, fontWeight: FontWeight.bold)),
+                              const SizedBox(width: 4),
+                              Text("km/kWh", style: TextStyle(color: effThemeColor.withOpacity(0.85), fontSize: 16, fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                          const SizedBox(height: 2),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.baseline,
+                            textBaseline: TextBaseline.alphabetic,
+                            children: [
+                              Text(_soc.toStringAsFixed(1), style: TextStyle(color: effThemeColor, fontSize: 58, fontWeight: FontWeight.bold)),
+                              Text("%", style: TextStyle(color: effThemeColor, fontSize: 24, fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              Expanded(
+                flex: 15,
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Text("히터PTC", style: TextStyle(color: Colors.redAccent, fontSize: 10, fontWeight: FontWeight.bold)),
+                    Text("${_ptcTemp.toStringAsFixed(0)}°C", style: const TextStyle(color: Colors.redAccent, fontSize: 12, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 4),
+                    Expanded(
+                      child: Container(
+                        width: 14,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF222A35),
+                          borderRadius: BorderRadius.circular(7),
+                        ),
+                        child: LayoutBuilder(
+                          builder: (context, constraints) {
+                            double halfHeight = constraints.maxHeight / 2.0;
+                            return Stack(
+                              children: [
+                                Align(
+                                  alignment: Alignment.center,
+                                  child: Container(width: 14, height: 2, color: Colors.white54),
+                                ),
+                                Positioned(
+                                  bottom: halfHeight,
+                                  left: 0,
+                                  right: 0,
+                                  child: Container(
+                                    height: halfHeight * ptcRatio,
+                                    decoration: const BoxDecoration(
+                                      color: Colors.redAccent,
+                                      borderRadius: BorderRadius.vertical(top: Radius.circular(7)),
+                                    ),
+                                  ),
+                                ),
+                                Positioned(
+                                  top: halfHeight,
+                                  left: 0,
+                                  right: 0,
+                                  child: Container(
+                                    height: halfHeight * acRatio,
+                                    decoration: const BoxDecoration(
+                                      color: Color(0xFF00E5FF),
+                                      borderRadius: BorderRadius.vertical(bottom: Radius.circular(7)),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text("${_evapTemp.toStringAsFixed(0)}°C", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 12, fontWeight: FontWeight.bold)),
+                    const Text("에어컨", style: TextStyle(color: Color(0xFF00E5FF), fontSize: 10, fontWeight: FontWeight.bold)),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildThemeARightPanel() {
+    Color effThemeColor = _getEfficiencyColor(_efficiencyScore);
+    double regenKw = _current < 0 ? _chargePowerKw : 0.0;
+    double regenPct = (_accumulatedRegenKwh / _batteryTotalKwh) * 100.0;
+    double gainedKm = _accumulatedRegenKwh * _pureDriveTripEfficiency;
+
+    double totalConsumed = _driveEnergyKwh + _hvacEnergyKwh;
+    int drivePct = totalConsumed > 0.01 ? ((_driveEnergyKwh / totalConsumed) * 100).round() : 85;
+    int hvacPct = 100 - drivePct;
+    bool isStopped = _realVehicleSpeedKmh <= 0.5;
+
+    return Column(
+      children: [
+        Expanded(
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF13171D),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: const Color(0xFF222A35)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text("🌱 실시간 주행 효율 (1분)", style: TextStyle(color: Colors.white70, fontSize: 15, fontWeight: FontWeight.w500)),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: isStopped ? Colors.white10 : effThemeColor.withOpacity(0.2),
+                        borderRadius: BorderRadius.circular(5),
+                        border: Border.all(color: isStopped ? Colors.white30 : effThemeColor, width: 0.8),
+                      ),
+                      child: Text(
+                        isStopped ? "⏸️ 신호 대기" : (_efficiencyScore >= 80 ? "최고 효율" : (_efficiencyScore >= 50 ? "보통 주행" : "급가속/비효율")),
+                        style: TextStyle(color: isStopped ? Colors.white70 : effThemeColor, fontSize: 12, fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  textBaseline: TextBaseline.alphabetic,
+                  children: [
+                    Text("$_efficiencyScore", style: TextStyle(color: effThemeColor, fontSize: 44, fontWeight: FontWeight.bold)),
+                    const SizedBox(width: 5),
+                    const Text("점", style: TextStyle(color: Colors.white54, fontSize: 18, fontWeight: FontWeight.bold)),
+                    const Spacer(),
+                    Text("${_recent1MinEfficiency.toStringAsFixed(1)} km/kWh", style: TextStyle(color: effThemeColor.withOpacity(0.8), fontSize: 16, fontWeight: FontWeight.bold)),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: LinearProgressIndicator(
+                    value: (_efficiencyScore / 100.0).clamp(0.0, 1.0),
+                    backgroundColor: const Color(0xFF222A35),
+                    valueColor: AlwaysStoppedAnimation<Color>(effThemeColor),
+                    minHeight: 6,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 10),
+        Expanded(
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF13171D),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: regenKw > 0.5 ? const Color(0xFFFF9100).withOpacity(0.6) : const Color(0xFF222A35)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text("회생 ${regenKw.toStringAsFixed(1)}kW", style: TextStyle(color: regenKw > 0.1 ? const Color(0xFF00E5FF) : Colors.white54, fontSize: 17, fontWeight: FontWeight.bold)),
+                    Text("+${regenPct.toStringAsFixed(1)}%", style: const TextStyle(color: Color(0xFF00E676), fontSize: 17, fontWeight: FontWeight.bold)),
+                    Text("+${gainedKm.toStringAsFixed(1)}km 이득", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 17, fontWeight: FontWeight.bold)),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  textBaseline: TextBaseline.alphabetic,
+                  children: [
+                    const Text("주행 ", style: TextStyle(color: Colors.white70, fontSize: 16)),
+                    Text("$drivePct%", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 30, fontWeight: FontWeight.bold)),
+                    const SizedBox(width: 12),
+                    const Text("· 공조 ", style: TextStyle(color: Colors.white70, fontSize: 16)),
+                    Text("$hvacPct%", style: const TextStyle(color: Color(0xFFFFB300), fontSize: 30, fontWeight: FontWeight.bold)),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(5),
+                  child: LinearProgressIndicator(
+                    value: drivePct / 100.0,
+                    backgroundColor: const Color(0xFFFFB300),
+                    valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF00E5FF)),
+                    minHeight: 10,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildThemeAPowerBar() {
+    double safeLimitKw = _getSafePowerLimitKw(_batteryTemp);
+    Color dynamicBarColor = _getPowerGaugeColor(_powerKw, _batteryTemp);
+    bool isRegenLimited = (_soc >= 90.5) || (_batteryTemp < 5.0);
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+      decoration: BoxDecoration(
+        color: const Color(0xFF13171D),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFF222A35)),
+      ),
+      child: Column(
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                children: [
+                  const Text("◀ 회생제동 (REGEN)", style: TextStyle(color: Color(0xFF00E5FF), fontSize: 13, fontWeight: FontWeight.bold)),
+                  if (isRegenLimited) ...[
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                      decoration: BoxDecoration(
+                        color: Colors.redAccent.withOpacity(0.2),
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(color: Colors.redAccent, width: 0.8),
+                      ),
+                      child: const Text("⚠️ 회생제한 (풋브레이크 권장)", style: TextStyle(color: Colors.redAccent, fontSize: 11, fontWeight: FontWeight.bold)),
+                    ),
+                  ],
+                ],
+              ),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text("실시간: ${_powerKw.toStringAsFixed(1)} kW", style: TextStyle(color: _powerKw < -0.1 ? const Color(0xFF00E5FF) : dynamicBarColor, fontSize: 15, fontWeight: FontWeight.bold)),
+                  const SizedBox(width: 6),
+                  Text("(한계: ${safeLimitKw.toStringAsFixed(0)}kW)", style: const TextStyle(color: Colors.white38, fontSize: 13)),
+                ],
+              ),
+              const Text("가속 출력 (POWER) ▶", style: TextStyle(color: Colors.redAccent, fontSize: 13, fontWeight: FontWeight.bold)),
+            ],
+          ),
+          const SizedBox(height: 6),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              double barWidth = constraints.maxWidth;
+              double halfWidth = barWidth / 2.0;
+
+              double powerMagnitude = _powerKw.abs().clamp(0.0, 50.0);
+              double fillWidth = (powerMagnitude / 50.0) * halfWidth;
+
+              double limitNormalized = (safeLimitKw / 50.0).clamp(0.0, 1.0);
+              double pinLeft = halfWidth + (halfWidth * limitNormalized) - 4.0;
+
+              return Stack(
+                clipBehavior: Clip.none,
+                alignment: Alignment.centerLeft,
+                children: [
+                  Container(
+                    width: barWidth,
+                    height: 12,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF222A35),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                  ),
+                  if (_powerKw < -0.1)
+                    Positioned(
+                      right: halfWidth,
+                      child: Container(
+                        width: fillWidth,
+                        height: 12,
+                        decoration: const BoxDecoration(
+                          color: Color(0xFF00E5FF),
+                          borderRadius: BorderRadius.horizontal(left: Radius.circular(6)),
+                        ),
+                      ),
+                    )
+                  else if (_powerKw > 0.1)
+                    Positioned(
+                      left: halfWidth,
+                      child: Container(
+                        width: fillWidth,
+                        height: 12,
+                        decoration: BoxDecoration(
+                          color: dynamicBarColor,
+                          borderRadius: const BorderRadius.horizontal(right: Radius.circular(6)),
+                        ),
+                      ),
+                    ),
+                  Positioned(
+                    left: halfWidth - 1.0,
+                    child: Container(
+                      width: 2.0,
+                      height: 16,
+                      color: Colors.white70,
+                    ),
+                  ),
+                  Positioned(
+                    left: pinLeft.clamp(halfWidth, barWidth - 8.0),
+                    child: Container(
+                      width: 8,
+                      height: 18,
+                      decoration: BoxDecoration(
+                        color: Colors.redAccent,
+                        borderRadius: BorderRadius.circular(2.0),
+                        boxShadow: const [
+                          BoxShadow(color: Colors.black87, blurRadius: 3, offset: Offset(0, 1)),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  // =========================================================================
+  // [테마 B: 운전자 집중 세로형 레이아웃]
+  // =========================================================================
+  Widget _buildThemeBDriverDashboard() {
     return Row(
       children: [
         // 1. 좌측: 대형 수직 파워 & 회생제동 미터기 (22% 너비)
@@ -1347,6 +1935,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  // =========================================================================
+  // [캠핑 모드 & 공통 하단 위젯]
+  // =========================================================================
   Widget _buildCampingDashboard() {
     bool isCharging = _chargePowerKw > 0.3;
     bool isFastCharge = _chargePowerKw > 10.0;
