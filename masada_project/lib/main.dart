@@ -57,14 +57,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Timer? _heartbeatTimer;
 
   // 실시간 차량 데이터
-  double _soc = 64.0;
+  double _soc = 62.0;
   double _voltage = 315.0;
   double _current = 0.0;
   double _powerKw = 0.0;
   double _chargePowerKw = 0.0;
-  double _batteryTemp = 42.0;
+  double _batteryTemp = 28.0;
   int _soh = 94;
-  double _bmsDistance = 143.1;
+  double _bmsDistance = 128.6;
 
   bool _isWaterAlarm = false;
   double _realVehicleSpeedKmh = 0.0;
@@ -78,10 +78,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
   int _cellMinMv = 3300;
   int _cellDeltaMv = 15;
 
-  final List<_DrivingSample> _recent3MinSamples = [];
-  double _recent3MinEfficiency = 5.7;
+  // 💡 [1분 실시간 주행 효율 샘플 버퍼]
+  final List<_DrivingSample> _recent1MinSamples = [];
+  double _recent1MinEfficiency = 5.7;
   int _efficiencyScore = 50;
 
+  // 💡 [이번 주행(D, R) 순수 누적 에너지 및 거리]
+  double _pureDriveEnergyKwh = 0.0;
+  double _pureDriveDistanceKm = 0.0;
+  double _pureDriveTripEfficiency = 5.7;
+
+  // 누적 통계
   double _accumulatedRegenKwh = 0.0;
   double _driveEnergyKwh = 0.0;
   double _hvacEnergyKwh = 0.0;
@@ -188,7 +195,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _rxBuffer.addAll(data);
     _asciiBuffer += String.fromCharCodes(data);
 
-    // 1. ASCII 라인 파싱
     if (_asciiBuffer.contains('\r') || _asciiBuffer.contains('\n')) {
       List<String> lines = _asciiBuffer.split(RegExp(r'[\r\n]+'));
       _asciiBuffer = lines.last;
@@ -197,11 +203,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
       }
     }
 
-    // 2. 바이너리 스트림 파싱
     while (_rxBuffer.length >= 12) {
       bool matched = false;
       for (int i = 0; i <= _rxBuffer.length - 12; i++) {
-        // CAN ID 추출 (4바이트 Big-Endian / Little-Endian)
         int idBig = ((_rxBuffer[i] << 24) | (_rxBuffer[i + 1] << 16) | (_rxBuffer[i + 2] << 8) | _rxBuffer[i + 3]) & 0x1FFFFFFF;
         int idLittle = ((_rxBuffer[i + 3] << 24) | (_rxBuffer[i + 2] << 16) | (_rxBuffer[i + 1] << 8) | _rxBuffer[i]) & 0x1FFFFFFF;
         
@@ -239,7 +243,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return bytes;
   }
 
-  // 💡 [DBC 원본 기준 메시지 라우터]
   bool _dispatchCanMessage(int id, List<int> d) {
     if (d.length < 8) return false;
 
@@ -293,7 +296,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
 
     // 3. VCU_Meter (BO_ 2566904833 = 0x19014801 / 0x18FF50E5 / 0x18FFDC01)
-    // SG_ Gear : 34|2@1+ -> d[4] bit 2..3 (0: N, 1: D, 2: R, 3: P)
     if (id == 0x19014801 || id == 0x18FF50E5 || id == 0x18FFDC01 || id == 0x09014801) {
       int rawGear = (d[4] >> 2) & 0x03;
       if (rawGear == 0) {
@@ -315,8 +317,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
 
     // 4. Meter_VCU_1 (BO_ 2566839509 = 0x190048D5 / 0x18FEDCD5)
-    // SG_ Speed : 0|8@1+ -> d[0]
-    // SG_ Distance : 8|32@1+ -> d[1..4]
     if (id == 0x190048D5 || id == 0x18FEDCD5 || id == 0x090048D5) {
       _realVehicleSpeedKmh = d[0].toDouble();
 
@@ -348,6 +348,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         setState(() {
           _drivingSeconds++;
 
+          // N단 60초 지속 시 자동 캠핑모드
           if (_currentGear == "N" || (_realVehicleSpeedKmh < 0.5 && _powerKw.abs() < 0.3)) {
             _neutralDurationSeconds++;
             if (_neutralDurationSeconds >= 60 && !_isCampingMode) {
@@ -361,6 +362,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
           }
 
           if (!_isCampingMode && _isConnected) {
+            double currentSpeed = _realVehicleSpeedKmh > 0.5 ? _realVehicleSpeedKmh : (_powerKw > 1.0 ? (_powerKw * 4.5).clamp(10.0, 100.0) : 0.0);
+            double secondDistKm = currentSpeed / 3600.0;
+
             if (_current < -0.5 && _chargePowerKw > 0.1) {
               _accumulatedRegenKwh += (_chargePowerKw / 3600.0);
             }
@@ -374,43 +378,61 @@ class _DashboardScreenState extends State<DashboardScreen> {
             }
 
             if (_realVehicleSpeedKmh <= 0.0 && _powerKw > 1.0) {
-              _accumulatedRealTripKm += ((_powerKw * 4.5).clamp(10.0, 100.0) / 3600.0);
+              _accumulatedRealTripKm += secondDistKm;
             } else if (_realVehicleSpeedKmh > 0.0) {
-              _accumulatedRealTripKm += (_realVehicleSpeedKmh / 3600.0);
+              _accumulatedRealTripKm += secondDistKm;
             }
 
-            _update3MinEfficiency();
+            // 💡 [D, R 기어 상태일 때만 순수 주행 전비 연산에 누적]
+            if (_currentGear == "D" || _currentGear == "R") {
+              if (_powerKw > 0.1) {
+                _pureDriveEnergyKwh += (_powerKw / 3600.0);
+              }
+              _pureDriveDistanceKm += secondDistKm;
+
+              if (_pureDriveEnergyKwh > 0.02 && _pureDriveDistanceKm > 0.05) {
+                _pureDriveTripEfficiency = (_pureDriveDistanceKm / _pureDriveEnergyKwh).clamp(2.0, 12.0);
+              }
+            }
+
+            _update1MinEfficiencyAndBmsDistance();
           }
         });
       }
     });
   }
 
-  void _update3MinEfficiency() {
+  // 💡 [1분 실시간 효율 및 복합 전비 BMS 주행가능거리 연산]
+  void _update1MinEfficiencyAndBmsDistance() {
     double speed = _realVehicleSpeedKmh > 0.5 ? _realVehicleSpeedKmh : (_powerKw > 1.0 ? (_powerKw * 4.5).clamp(10.0, 100.0) : 0.0);
 
-    _recent3MinSamples.add(_DrivingSample(_powerKw, speed));
-    if (_recent3MinSamples.length > 180) {
-      _recent3MinSamples.removeAt(0);
+    // 1분(60초) 샘플링
+    _recent1MinSamples.add(_DrivingSample(_powerKw, speed));
+    if (_recent1MinSamples.length > 60) {
+      _recent1MinSamples.removeAt(0);
     }
 
-    if (_recent3MinSamples.length >= 10) {
+    if (_recent1MinSamples.length >= 10) {
       double totalNetKwh = 0.0;
       double totalDistanceKm = 0.0;
-      for (var s in _recent3MinSamples) {
+      for (var s in _recent1MinSamples) {
         totalNetKwh += (s.powerKw / 3600.0);
         totalDistanceKm += (s.realSpeedKmh / 3600.0);
       }
       if (totalNetKwh > 0.005 && totalDistanceKm > 0.01) {
-        _recent3MinEfficiency = (totalDistanceKm / totalNetKwh).clamp(2.0, 10.0);
+        _recent1MinEfficiency = (totalDistanceKm / totalNetKwh).clamp(2.0, 10.0);
       }
     }
 
-    double rawScore = ((_recent3MinEfficiency - 3.7) / (7.7 - 3.7)) * 100.0;
+    double rawScore = ((_recent1MinEfficiency - 3.7) / (7.7 - 3.7)) * 100.0;
     _efficiencyScore = rawScore.clamp(0.0, 100.0).round();
 
+    // 💡 [수정 요청 1]: 30%는 배터리 1% * 2.4km, 나머지 70%는 이번 순수 주행 전비(D, R)
+    double baseDistance30Pct = (_soc * 2.4) * 0.3;
     double currentRemainKwh = (_batteryTotalKwh * (_soh / 100.0)) * (_soc / 100.0);
-    _bmsDistance = double.parse((currentRemainKwh * _recent3MinEfficiency).toStringAsFixed(1));
+    double dynamicDistance70Pct = (currentRemainKwh * _pureDriveTripEfficiency) * 0.7;
+
+    _bmsDistance = double.parse((baseDistance30Pct + dynamicDistance70Pct).toStringAsFixed(1));
   }
 
   String _calculateTimeToSoc(double targetSoc) {
@@ -870,9 +892,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ),
         const SizedBox(height: 10),
+        // 💡 [수정 요청 1: 복합 전비 기반 BMS 주행가능거리]
         Expanded(
           child: _buildCard(
-            title: "BMS 주행가능거리 (3분 전비)",
+            title: "BMS 주행가능거리 (복합 전비)",
             valueText: _bmsDistance.toStringAsFixed(1),
             unitText: "km",
             valueColor: effThemeColor,
@@ -882,6 +905,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  // 💡 [수정 요청 3: 이번 주행 순수 전비(D, R)를 중앙 게이지에 표시]
   Widget _buildCenterSocGauge() {
     Color effThemeColor = _getEfficiencyColor(_efficiencyScore);
     return Container(
@@ -912,7 +936,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   crossAxisAlignment: CrossAxisAlignment.baseline,
                   textBaseline: TextBaseline.alphabetic,
                   children: [
-                    Text(_recent3MinEfficiency.toStringAsFixed(1), style: TextStyle(color: effThemeColor, fontSize: 32, fontWeight: FontWeight.bold)),
+                    Text(_pureDriveTripEfficiency.toStringAsFixed(1), style: TextStyle(color: effThemeColor, fontSize: 32, fontWeight: FontWeight.bold)),
                     const SizedBox(width: 5),
                     Text("km/kWh", style: TextStyle(color: effThemeColor.withOpacity(0.85), fontSize: 20, fontWeight: FontWeight.bold)),
                   ],
@@ -935,23 +959,20 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  // 💡 [수정 요청 2: 우측 상단에 '실시간 주행 효율(1분)' 배치]
   Widget _buildRightPanel() {
-    bool isChargingOrRegen = _chargePowerKw > 0.1;
-    bool isFastCharge = _chargePowerKw > 10.0;
-    String cardTitle = isChargingOrRegen ? (isFastCharge ? "⚡ 급속 충전 중" : "🔌 완속 충전 중") : "실시간 충전량";
-    if (isChargingOrRegen && _current >= -5.0 && _chargePowerKw <= 1.0) cardTitle = "♻️ 회생제동 충전 중";
-    Color titleColor = isChargingOrRegen ? const Color(0xFFFFB300) : Colors.white70;
+    Color effThemeColor = _getEfficiencyColor(_efficiencyScore);
+    double regenKw = _current < 0 ? _chargePowerKw : 0.0;
+    double regenPct = (_accumulatedRegenKwh / _batteryTotalKwh) * 100.0;
+    double gainedKm = _accumulatedRegenKwh * _pureDriveTripEfficiency;
 
     double totalConsumed = _driveEnergyKwh + _hvacEnergyKwh;
     int drivePct = totalConsumed > 0.01 ? ((_driveEnergyKwh / totalConsumed) * 100).round() : 85;
     int hvacPct = 100 - drivePct;
 
-    double regenKw = _current < 0 ? _chargePowerKw : 0.0;
-    double regenPct = (_accumulatedRegenKwh / _batteryTotalKwh) * 100.0;
-    double gainedKm = _accumulatedRegenKwh * _recent3MinEfficiency;
-
     return Column(
       children: [
+        // 💡 [우측 상단: 실시간 주행 효율 (1분 주기 점수 & 뱃지)]
         Expanded(
           child: Container(
             width: double.infinity,
@@ -959,7 +980,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             decoration: BoxDecoration(
               color: const Color(0xFF13171D),
               borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: isChargingOrRegen ? const Color(0xFFFFB300).withOpacity(0.6) : const Color(0xFF222A35)),
+              border: Border.all(color: const Color(0xFF222A35)),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -968,55 +989,49 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text(cardTitle, style: TextStyle(color: titleColor, fontSize: 16, fontWeight: FontWeight.bold)),
-                    Text(_calculateChargeRatePerHour(), style: TextStyle(color: isChargingOrRegen ? const Color(0xFFFFB300) : Colors.white38, fontSize: 14)),
+                    const Text("🌱 실시간 주행 효율 (1분)", style: TextStyle(color: Colors.white70, fontSize: 15, fontWeight: FontWeight.w500)),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: effThemeColor.withOpacity(0.2),
+                        borderRadius: BorderRadius.circular(5),
+                        border: Border.all(color: effThemeColor, width: 0.8),
+                      ),
+                      child: Text(
+                        _efficiencyScore >= 80 ? "최고 효율" : (_efficiencyScore >= 50 ? "보통 주행" : "급가속/비효율"),
+                        style: TextStyle(color: effThemeColor, fontSize: 12, fontWeight: FontWeight.bold),
+                      ),
+                    ),
                   ],
                 ),
                 const SizedBox(height: 4),
                 Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  crossAxisAlignment: CrossAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  textBaseline: TextBaseline.alphabetic,
                   children: [
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.baseline,
-                      textBaseline: TextBaseline.alphabetic,
-                      children: [
-                        Text(_chargePowerKw.toStringAsFixed(1), style: TextStyle(color: isChargingOrRegen ? const Color(0xFFFFB300) : Colors.white38, fontSize: 44, fontWeight: FontWeight.bold)),
-                        const SizedBox(width: 5),
-                        const Text("kW", style: TextStyle(color: Colors.white54, fontSize: 20, fontWeight: FontWeight.bold)),
-                      ],
-                    ),
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF00E5FF).withOpacity(0.15),
-                            borderRadius: BorderRadius.circular(5),
-                            border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.4)),
-                          ),
-                          child: Text("80% ${_calculateTimeToSoc(80.0)}", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 12, fontWeight: FontWeight.bold)),
-                        ),
-                        const SizedBox(height: 4),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF00E676).withOpacity(0.15),
-                            borderRadius: BorderRadius.circular(5),
-                            border: Border.all(color: const Color(0xFF00E676).withOpacity(0.4)),
-                          ),
-                          child: Text("100% ${_calculateTimeToSoc(100.0)}", style: const TextStyle(color: Color(0xFF00E676), fontSize: 12, fontWeight: FontWeight.bold)),
-                        ),
-                      ],
-                    ),
+                    Text("$_efficiencyScore", style: TextStyle(color: effThemeColor, fontSize: 44, fontWeight: FontWeight.bold)),
+                    const SizedBox(width: 5),
+                    const Text("점", style: TextStyle(color: Colors.white54, fontSize: 18, fontWeight: FontWeight.bold)),
+                    const Spacer(),
+                    Text("${_recent1MinEfficiency.toStringAsFixed(1)} km/kWh", style: TextStyle(color: effThemeColor.withOpacity(0.8), fontSize: 16, fontWeight: FontWeight.bold)),
                   ],
+                ),
+                const SizedBox(height: 4),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: LinearProgressIndicator(
+                    value: (_efficiencyScore / 100.0).clamp(0.0, 1.0),
+                    backgroundColor: const Color(0xFF222A35),
+                    valueColor: AlwaysStoppedAnimation<Color>(effThemeColor),
+                    minHeight: 6,
+                  ),
                 ),
               ],
             ),
           ),
         ),
         const SizedBox(height: 10),
+        // [우측 하단: 회생 이득 및 주행/공조 비율 유지]
         Expanded(
           child: Container(
             width: double.infinity,
@@ -1237,17 +1252,22 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  // 💡 [수정 요청 2: 하단 바 중앙에 '실시간 충전량' 컴팩트 배치]
   Widget _buildExtendedAdvancedBar() {
     double avgLoadPct = _loadSampleCount > 0 ? (_accumulatedLoadPct / _loadSampleCount) : 0.0;
     Map<String, dynamic> cellBal = _getCellBalanceStatus();
     Map<String, dynamic> loadGrade = _getLoadGrade(avgLoadPct);
-    Color effThemeColor = _getEfficiencyColor(_efficiencyScore);
+
+    bool isChargingOrRegen = _chargePowerKw > 0.1;
+    bool isFastCharge = _chargePowerKw > 10.0;
+    String chargeLabel = isChargingOrRegen ? (isFastCharge ? "⚡ 급속 충전 중" : "🔌 완속 충전 중") : "⚡ 실시간 충전/회생";
 
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
+        // 1. 이번주행 평균 부하율
         Expanded(
-          flex: 35,
+          flex: 32,
           child: _buildExtendedCard(
             title: "⚡ 이번주행 평균 부하율",
             child: Row(
@@ -1273,35 +1293,50 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ),
         const SizedBox(width: 6),
+        // 💡 [2. 하단 중앙으로 이동한 실시간 충전/회생 상태 카드]
         Expanded(
-          flex: 32,
+          flex: 38,
           child: _buildExtendedCard(
-            title: "🌱 실시간 주행 효율 (3분)",
+            title: chargeLabel,
             child: Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Text("$_efficiencyScore", style: TextStyle(color: effThemeColor, fontSize: 18, fontWeight: FontWeight.bold)),
-                const Text(" 점", style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
-                const SizedBox(width: 6),
+                Text(
+                  "${_chargePowerKw.toStringAsFixed(1)} kW",
+                  style: TextStyle(
+                    color: isChargingOrRegen ? const Color(0xFFFFB300) : Colors.white70,
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(width: 8),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
                   decoration: BoxDecoration(
-                    color: effThemeColor.withOpacity(0.2),
+                    color: const Color(0xFF00E5FF).withOpacity(0.15),
                     borderRadius: BorderRadius.circular(4),
-                    border: Border.all(color: effThemeColor, width: 0.8),
+                    border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.4)),
                   ),
-                  child: Text(
-                    _efficiencyScore >= 80 ? "에코" : (_efficiencyScore >= 50 ? "보통" : "비효율"),
-                    style: TextStyle(color: effThemeColor, fontSize: 11, fontWeight: FontWeight.bold),
+                  child: Text("80% ${_calculateTimeToSoc(80.0)}", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 10, fontWeight: FontWeight.bold)),
+                ),
+                const SizedBox(width: 4),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF00E676).withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(color: const Color(0xFF00E676).withOpacity(0.4)),
                   ),
+                  child: Text("100% ${_calculateTimeToSoc(100.0)}", style: const TextStyle(color: Color(0xFF00E676), fontSize: 10, fontWeight: FontWeight.bold)),
                 ),
               ],
             ),
           ),
         ),
         const SizedBox(width: 6),
+        // 3. 셀 밸런싱 편차 게이지
         Expanded(
-          flex: 33,
+          flex: 30,
           child: _buildExtendedCard(
             title: "⚖️ 셀 밸런싱 편차 (ΔV)",
             child: Row(
