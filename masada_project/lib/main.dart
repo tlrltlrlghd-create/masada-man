@@ -46,7 +46,9 @@ class DashboardScreen extends StatefulWidget {
 
 class _DashboardScreenState extends State<DashboardScreen> {
   bool _isCampingMode = false;
-  int _currentThemeIndex = 0; // 0: 테마A, 1: 테마B, 2: 테마C(나이트), 3: 테마D(에코)
+  late PageController _pageController;
+  int _currentThemeIndex = 0; // 0: 테마A, 1: 테마B, 2: 테마C, 3: 테마D
+  static const int _virtualInitialPage = 1000;
   static const double _batteryTotalKwh = 38.7;
 
   BluetoothConnection? _connection;
@@ -86,7 +88,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   int _onePedalRegenSeconds = 0;
   int _onePedalScorePct = 100;
 
-  // 테슬라 스타일 에너지 소비 4분할
+  // 에너지 소비 4분할
   double _energyDriveKwh = 0.0;
   double _energyPtcKwh = 0.0;
   double _energyAcKwh = 0.0;
@@ -123,6 +125,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   void initState() {
     super.initState();
+    _pageController = PageController(initialPage: _virtualInitialPage);
     _startDrivingTimer();
     _connectToLogger();
     _autoConnectTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
@@ -134,17 +137,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   @override
   void dispose() {
+    _pageController.dispose();
     _autoConnectTimer?.cancel();
     _heartbeatTimer?.cancel();
     _drivingTimer?.cancel();
     _connection?.dispose();
     super.dispose();
-  }
-
-  void _toggleTheme() {
-    setState(() {
-      _currentThemeIndex = (_currentThemeIndex + 1) % 4;
-    });
   }
 
   void _startHeartbeat() {
@@ -792,13 +790,22 @@ class _DashboardScreenState extends State<DashboardScreen> {
               Expanded(
                 child: _isCampingMode
                     ? _buildCampingDashboard()
-                    : (_currentThemeIndex == 0
-                        ? _buildThemeAStandardDashboard()
-                        : (_currentThemeIndex == 1
-                            ? _buildThemeBDriverDashboard()
-                            : (_currentThemeIndex == 2
-                                ? _buildThemeCNightDashboard()
-                                : _buildThemeDEcoDashboard()))),
+                    : PageView.builder(
+                        controller: _pageController,
+                        physics: const BouncingScrollPhysics(),
+                        onPageChanged: (pageIndex) {
+                          setState(() {
+                            _currentThemeIndex = pageIndex % 4;
+                          });
+                        },
+                        itemBuilder: (context, index) {
+                          int theme = index % 4;
+                          if (theme == 0) return _buildThemeAStandardDashboard();
+                          if (theme == 1) return _buildThemeBDriverDashboard();
+                          if (theme == 2) return _buildThemeCNightDashboard();
+                          return _buildThemeDEcoDashboard();
+                        },
+                      ),
               ),
               if (!_isCampingMode && _currentThemeIndex == 0) ...[
                 const SizedBox(height: 4),
@@ -816,10 +823,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Widget _buildHeader() {
-    String themeLabel = "테마 A(가로)";
-    if (_currentThemeIndex == 1) themeLabel = "테마 B(세로)";
-    else if (_currentThemeIndex == 2) themeLabel = "테마 C(나이트)";
-    else if (_currentThemeIndex == 3) themeLabel = "테마 D(에코)";
+    List<String> themeNames = ["테마 A (가로)", "테마 B (세로)", "테마 C (나이트)", "테마 D (에코)"];
 
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -873,6 +877,27 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ),
             ),
             const SizedBox(width: 8),
+            if (!_isCampingMode)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                decoration: BoxDecoration(
+                  color: Colors.purpleAccent.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: Colors.purpleAccent.withOpacity(0.5), width: 0.8),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.swipe, color: Colors.purpleAccent, size: 11),
+                    const SizedBox(width: 3),
+                    Text(
+                      themeNames[_currentThemeIndex],
+                      style: const TextStyle(color: Colors.purpleAccent, fontSize: 11, fontWeight: FontWeight.bold),
+                    ),
+                  ],
+                ),
+              ),
+            const SizedBox(width: 8),
             if (_isFootBrakePressed)
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
@@ -893,28 +918,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
         ),
         Row(
           children: [
-            GestureDetector(
-              onTap: _toggleTheme,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF1E242C),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: Colors.purpleAccent.withOpacity(0.8), width: 1.0),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(Icons.palette_outlined, color: Colors.purpleAccent, size: 14),
-                    const SizedBox(width: 4),
-                    Text(
-                      themeLabel,
-                      style: const TextStyle(color: Colors.purpleAccent, fontSize: 12, fontWeight: FontWeight.bold),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(width: 6),
             GestureDetector(
               onTap: _showBatteryManagementDialog,
               child: Container(
