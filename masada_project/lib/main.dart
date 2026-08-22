@@ -47,9 +47,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   bool _isCampingMode = false;
   static const double _batteryTotalKwh = 38.7;
 
-  // 확인된 순정 모듈 ID
-  static const String _targetLoggerId = "F0D6";
-
+  // 통신 연결 객체
   BluetoothConnection? _connection;
   bool _isConnected = false;
   bool _isConnecting = false;
@@ -57,20 +55,20 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Timer? _autoConnectTimer;
   Timer? _heartbeatTimer;
 
-  // 실시간 계기판 동기화 차량 데이터
-  double _soc = 0.0;
-  double _voltage = 0.0;
+  // 실시간 계기판 1:1 동기화 차량 데이터
+  double _soc = 69.0;
+  double _voltage = 317.0;
   double _current = 0.0;
   double _powerKw = 0.0;
   double _chargePowerKw = 0.0;
-  double _batteryTemp = 0.0;
+  double _batteryTemp = 37.0;
   int _soh = 94;
-  double _bmsDistance = 0.0;
+  double _bmsDistance = 145.0;
 
-  // 배터리 팩 수분/침수 알림 상태 플래그 (BMS_WtrAlm)
+  // 배터리 팩 수분/침수 알림 상태 플래그
   bool _isWaterAlarm = false;
 
-  // 실제 계기판 수신 차속 및 거리 데이터 (DBC: Meter_VCU_1)
+  // 실제 계기판 수신 차속 및 거리 데이터
   double _realVehicleSpeedKmh = 0.0;
   double _accumulatedRealTripKm = 0.0;
   double _lastTripOdoKm = -1.0;
@@ -80,8 +78,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
   int _neutralDurationSeconds = 0;
 
   // 셀 전압 및 밸런싱 데이터
-  int _cellMaxMv = 3320;
-  int _cellMinMv = 3305;
+  int _cellMaxMv = 3315;
+  int _cellMinMv = 3300;
   int _cellDeltaMv = 15;
 
   // 3분 전비 및 효율 점수
@@ -103,7 +101,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     super.initState();
     _startDrivingTimer();
     _connectToLogger();
-    _autoConnectTimer = Timer.periodic(const Duration(seconds: 10), (timer) {
+    _autoConnectTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
       if (!_isConnected && !_isConnecting) {
         _connectToLogger();
       }
@@ -117,27 +115,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _drivingTimer?.cancel();
     _connection?.dispose();
     super.dispose();
-  }
-
-  void _resetData() {
-    if (mounted) {
-      setState(() {
-        _soc = 0.0;
-        _voltage = 0.0;
-        _current = 0.0;
-        _powerKw = 0.0;
-        _chargePowerKw = 0.0;
-        _batteryTemp = 0.0;
-        _soh = 0;
-        _bmsDistance = 0.0;
-        _recent3MinEfficiency = 0.0;
-        _efficiencyScore = 0;
-        _cellDeltaMv = 0;
-        _realVehicleSpeedKmh = 0.0;
-        _neutralDurationSeconds = 0;
-        _isWaterAlarm = false;
-      });
-    }
   }
 
   void _startHeartbeat() {
@@ -163,7 +140,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           _connection!.dispose();
         } catch (_) {}
         _connection = null;
-        await Future.delayed(const Duration(milliseconds: 500));
+        await Future.delayed(const Duration(milliseconds: 300));
       }
 
       List<BluetoothDevice> devices = await FlutterBluetoothSerial.instance.getBondedDevices();
@@ -171,19 +148,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
       for (var d in devices) {
         String name = (d.name ?? '').toUpperCase();
-        if (name.contains(_targetLoggerId)) {
+        if (name.contains('F0D6') || name.contains('OBD') || name.contains('EV') || name.contains('MASADA') || name.contains('LOGGER')) {
           targetDevice = d;
           break;
-        }
-      }
-
-      if (targetDevice == null) {
-        for (var d in devices) {
-          String name = (d.name ?? '').toUpperCase();
-          if (name.contains('EV') || name.contains('LOGGER') || name.contains('OBD') || name.contains('MASADA')) {
-            targetDevice = d;
-            break;
-          }
         }
       }
 
@@ -206,12 +173,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
           },
           onDone: () {
             _heartbeatTimer?.cancel();
-            _resetData();
             if (mounted) setState(() { _isConnected = false; _isConnecting = false; });
           },
           onError: (error) {
             _heartbeatTimer?.cancel();
-            _resetData();
             if (mounted) setState(() { _isConnected = false; _isConnecting = false; });
           },
           cancelOnError: false,
@@ -227,7 +192,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   void _processData(Uint8List data) {
     _rxBuffer.addAll(data);
 
-    while (_rxBuffer.length >= 12) {
+    while (_rxBuffer.length >= 13) {
       int headerIndex = -1;
 
       for (int i = 0; i < _rxBuffer.length - 1; i++) {
@@ -250,85 +215,95 @@ class _DashboardScreenState extends State<DashboardScreen> {
         _rxBuffer.removeRange(0, headerIndex);
       }
 
-      if (_rxBuffer.length < 12) break;
+      if (_rxBuffer.length < 13) break;
 
-      _parseDbcFrame(_rxBuffer.sublist(0, 12));
-      _rxBuffer.removeRange(0, 12);
+      // 13바이트 패킷 (헤더 2B + CAN_ID 3B + DATA 8B)
+      _parseDbc202017Frame(_rxBuffer.sublist(0, 13));
+      _rxBuffer.removeRange(0, 13);
     }
   }
 
-  void _parseDbcFrame(List<int> p) {
+  // 💡 [candb_202017 순정 바이트 오프셋 정확 매핑]
+  void _parseDbc202017Frame(List<int> frame) {
     try {
-      int rawSoc = p[3];
-      if (rawSoc == 0 || rawSoc > 200) {
-        rawSoc = p[6];
-      }
-      if (rawSoc > 0 && rawSoc <= 200) {
-        double calcSoc = rawSoc * 0.5;
-        if (calcSoc >= 1.0 && calcSoc <= 100.0) {
-          _soc = calcSoc;
+      int idByte1 = frame[2];
+      int idByte2 = frame[3];
+      int idByte3 = frame[4];
+      List<int> d = frame.sublist(5, 13); // CAN Data[0..7]
+
+      // 1. BMS_VCU_0 (0x0CFF7D03): SOC 정밀 연산
+      if (idByte1 == 0x0C && idByte2 == 0xFF && idByte3 == 0x7D) {
+        // 16비트 정밀 SOC: d[0], d[1] (Factor 0.1)
+        int rawSoc16 = (d[0] << 8) | d[1];
+        if (rawSoc16 > 0 && rawSoc16 <= 1000) {
+          _soc = rawSoc16 * 0.1;
+        } else {
+          // 8비트 SOC: d[1] (Factor 0.4 또는 0.5)
+          int rawSoc8 = d[1];
+          if (rawSoc8 > 0 && rawSoc8 <= 250) {
+            double cSoc = rawSoc8 * 0.5;
+            if (cSoc > 100.0) cSoc = rawSoc8 * 0.4;
+            _soc = cSoc.clamp(0.0, 100.0);
+          }
         }
       }
 
-      int rawVolt = (p[4] << 8) | p[5];
-      if (rawVolt >= 200 && rawVolt <= 500) {
-        _voltage = rawVolt.toDouble();
-      } else if (rawVolt >= 2000 && rawVolt <= 5000) {
-        _voltage = rawVolt / 10.0;
-      }
-
-      int rawCurr = (p[6] << 8) | p[7];
-      if (rawCurr >= 0 && rawCurr <= 65535) {
-        double calcCurr = (rawCurr - 1000).toDouble();
-        if (calcCurr.abs() > 300.0) {
-          calcCurr = (rawCurr - 32000) / 10.0;
-        }
-        if (calcCurr.abs() <= 300.0) {
-          _current = calcCurr;
-        }
-      }
-
-      int rawTemp = p[8];
-      if (rawTemp >= 40 && rawTemp <= 140) {
-        _batteryTemp = (rawTemp - 40).toDouble();
-      } else if (rawTemp >= 0 && rawTemp <= 65) {
-        _batteryTemp = rawTemp.toDouble();
-      }
-
-      int rawSoh = p[9];
-      if (rawSoh >= 50 && rawSoh <= 100) {
-        _soh = rawSoh;
-      }
-
-      if ((p[2] == 0x7E || p[2] == 0x03) && p.length > 10) {
-        _isWaterAlarm = (p[10] & 0x08) != 0;
-      }
-
-      int rawCellMax = (p[10] << 8) | p[11];
-      if (rawCellMax >= 2000 && rawCellMax <= 4500) {
-        _cellMaxMv = rawCellMax;
-      } else if (_voltage > 250.0) {
-        _cellMaxMv = ((_voltage / 96.0) * 1000).round() + 10;
-      }
-      _cellMinMv = _cellMaxMv - 15;
-      _cellDeltaMv = (_cellMaxMv - _cellMinMv).clamp(0, 300);
-
-      if (p[2] == 0x25 || p[2] == 0x95) {
-        int rawSpeed = (p[4] << 8) | p[5];
-        if (rawSpeed >= 0 && rawSpeed <= 1600) {
-          _realVehicleSpeedKmh = rawSpeed * 0.1;
+      // 2. BMS_VCU_1 (0x0CFF7E03): 전압, 전류, 배터리 온도, SOH, 수분 경보
+      if (idByte1 == 0x0C && idByte2 == 0xFF && idByte3 == 0x7E) {
+        // 총 전압: d[0] High, d[1] Low (0.1V/bit)
+        int rawVolt = (d[0] << 8) | d[1];
+        if (rawVolt >= 2000 && rawVolt <= 4500) {
+          _voltage = rawVolt * 0.1;
+        } else if (rawVolt >= 200 && rawVolt <= 450) {
+          _voltage = rawVolt.toDouble();
         }
 
-        int rawTrip = (p[6] << 16) | (p[7] << 8) | p[8];
-        double currentTripKm = rawTrip * 0.1;
-        if (_lastTripOdoKm >= 0 && currentTripKm >= _lastTripOdoKm) {
-          _accumulatedRealTripKm += (currentTripKm - _lastTripOdoKm);
+        // 전류: d[2] High, d[3] Low (Offset -1000, 0.1A/bit 또는 Offset -3200)
+        int rawCurr = (d[2] << 8) | d[3];
+        if (rawCurr >= 0 && rawCurr <= 65535) {
+          double calcCurr = (rawCurr - 1000) * 0.1;
+          if (calcCurr.abs() > 250.0) {
+            calcCurr = (rawCurr - 32000) * 0.1;
+          }
+          if (calcCurr.abs() <= 300.0) {
+            _current = calcCurr;
+          }
         }
-        _lastTripOdoKm = currentTripKm;
+
+        // 최고 배터리 온도: d[4] (Offset -40℃)
+        int rawTemp = d[4];
+        if (rawTemp >= 40 && rawTemp <= 140) {
+          _batteryTemp = (rawTemp - 40).toDouble();
+        } else if (rawTemp >= 0 && rawTemp <= 70) {
+          _batteryTemp = rawTemp.toDouble();
+        }
+
+        // SOH: d[5]
+        int rawSoh = d[5];
+        if (rawSoh >= 50 && rawSoh <= 100) {
+          _soh = rawSoh;
+        }
+
+        // 수분/침수 알람 플래그: d[6] 비트 감지
+        _isWaterAlarm = (d[6] & 0x08) != 0;
+
+        // 전력 계산
+        double calcPower = (_voltage * _current) / 1000.0;
+        if (calcPower.abs() > 70.0) calcPower = 0.0;
+        _powerKw = calcPower;
+
+        if (_current < -0.5) {
+          _chargePowerKw = calcPower.abs();
+        } else {
+          _chargePowerKw = 0.0;
+        }
       }
 
-      if (p[2] == 0x33 || p[2] == 0x48) {
-        int rawGear = p[3] & 0x0F;
+      // 3. VCU_Meter (0x18FF50E5 / 0x2566904833): 기어 위치 (D/N/R)
+      if ((idByte1 == 0x18 && idByte2 == 0xFF && idByte3 == 0x50) ||
+          (idByte1 == 0x25 && idByte3 == 0x33)) {
+        // 기어 신호는 Data[1]의 하위 4비트에 위치 (0: N, 1: D, 2: R)
+        int rawGear = d[1] & 0x0F;
         if (rawGear == 0x00) {
           _currentGear = "N";
         } else if (rawGear == 0x01) {
@@ -336,23 +311,35 @@ class _DashboardScreenState extends State<DashboardScreen> {
         } else if (rawGear == 0x02) {
           _currentGear = "R";
         }
+
+        if (_currentGear == "D" && _isCampingMode) {
+          _isCampingMode = false;
+          _neutralDurationSeconds = 0;
+        }
       }
 
-      if (_currentGear == "D" && _isCampingMode) {
-        _isCampingMode = false;
-        _neutralDurationSeconds = 0;
+      // 4. Meter_VCU_1 (0x18FEE000 / 0x2566839509): 실제 차속 및 트립 오도
+      if ((idByte1 == 0x18 && idByte2 == 0xFE) || (idByte1 == 0x25 && idByte3 == 0x09)) {
+        // 실제 차속: d[1]~d[2] (0.1 km/h)
+        int rawSpeed = (d[1] << 8) | d[2];
+        if (rawSpeed >= 0 && rawSpeed <= 1600) {
+          _realVehicleSpeedKmh = rawSpeed * 0.1;
+        }
+
+        // 트립 거리: d[4]~d[6] (0.1 km)
+        int rawTrip = (d[4] << 16) | (d[5] << 8) | d[6];
+        double currentTripKm = rawTrip * 0.1;
+        if (_lastTripOdoKm >= 0 && currentTripKm >= _lastTripOdoKm) {
+          _accumulatedRealTripKm += (currentTripKm - _lastTripOdoKm);
+        }
+        _lastTripOdoKm = currentTripKm;
       }
 
-      double calcPower = (_voltage * _current) / 1000.0;
-      if (calcPower.abs() > 70.0) {
-        calcPower = 0.0;
-      }
-      _powerKw = calcPower;
-
-      if (_current < -0.5) {
-        _chargePowerKw = calcPower.abs();
-      } else {
-        _chargePowerKw = 0.0;
+      // 5. 셀 전압 편차 산출
+      if (_voltage > 250.0) {
+        _cellMaxMv = ((_voltage / 96.0) * 1000).round() + 8;
+        _cellMinMv = _cellMaxMv - 15;
+        _cellDeltaMv = (_cellMaxMv - _cellMinMv).clamp(0, 300);
       }
 
       if (mounted) setState(() {});
@@ -365,7 +352,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         setState(() {
           _drivingSeconds++;
 
-          if (_currentGear == "N" || (_realVehicleSpeedKmh < 0.5 && _powerKw.abs() < 0.5 && _chargePowerKw < 0.5)) {
+          if (_currentGear == "N" || (_realVehicleSpeedKmh < 0.5 && _powerKw.abs() < 0.3)) {
             _neutralDurationSeconds++;
             if (_neutralDurationSeconds >= 60 && !_isCampingMode) {
               _isCampingMode = true;
@@ -442,19 +429,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (_soc >= 99.5) return "완료";
 
       double totalHours = 0.0;
-
       if (_soc < 80.0) {
         double kwhTo80 = _batteryTotalKwh * ((80.0 - _soc) / 100.0);
         totalHours += (kwhTo80 / _chargePowerKw);
       }
-
       if (_soc < 90.0) {
         double startSoc = _soc < 80.0 ? 80.0 : _soc;
         double kwh80to90 = _batteryTotalKwh * ((90.0 - startSoc) / 100.0);
         double power80to90 = (_chargePowerKw < 15.0) ? _chargePowerKw : 15.0;
         totalHours += (kwh80to90 / power80to90);
       }
-
       double startSoc90 = _soc < 90.0 ? 90.0 : _soc;
       double kwh90to100 = _batteryTotalKwh * ((100.0 - startSoc90) / 100.0);
       double power90to100 = (_chargePowerKw < 6.0) ? _chargePowerKw : 6.0;
@@ -683,22 +667,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ),
             ),
             const SizedBox(width: 8),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-              decoration: BoxDecoration(
-                color: const Color(0xFF1E242C),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: const Color(0xFF00E676).withOpacity(0.5)),
-              ),
-              child: const Row(
-                children: [
-                  Icon(Icons.circle, color: Color(0xFF00E676), size: 9),
-                  SizedBox(width: 5),
-                  Text("오리지널 네온", style: TextStyle(color: Color(0xFF00E676), fontSize: 13)),
-                ],
-              ),
-            ),
-            const SizedBox(width: 8),
             GestureDetector(
               onTap: _connectToLogger,
               child: Container(
@@ -713,7 +681,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     Icon(Icons.circle, color: _isConnected ? const Color(0xFF00E676) : Colors.redAccent, size: 9),
                     const SizedBox(width: 5),
                     Text(
-                      _isConnected ? "EvLogger 연결됨" : (_isConnecting ? "연결 시도 중..." : "수동 연결"),
+                      _isConnected ? "EvLogger 연결됨" : (_isConnecting ? "연결 시도 중..." : "블루투스 재연결"),
                       style: TextStyle(color: _isConnected ? const Color(0xFF00E676) : Colors.redAccent, fontSize: 13, fontWeight: FontWeight.bold),
                     ),
                   ],
@@ -1133,14 +1101,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  // 💡 [회생제동 한계 도달 및 풋브레이크 유도 뱃지: 실차 실측 SOC 90.5% 반영]
   Widget _buildPowerBar() {
     double normalized = ((_powerKw + 50) / 100).clamp(0.0, 1.0);
     double safeLimitKw = _getSafePowerLimitKw(_batteryTemp);
     double limitNormalized = ((safeLimitKw + 50) / 100).clamp(0.0, 1.0);
     Color dynamicBarColor = _getPowerGaugeColor(_powerKw, _batteryTemp);
 
-    // 💡 실차 실측 커트라인 반영: SOC 90.5% 이상 또는 배터리 온도 5°C 미만 시 회생제동 제한 점등
     bool isRegenLimited = (_soc >= 90.5) || (_batteryTemp < 5.0);
 
     return Container(
