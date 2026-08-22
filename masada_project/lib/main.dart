@@ -78,17 +78,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
   int _cellMinMv = 3300;
   int _cellDeltaMv = 15;
 
-  // 💡 [1분 실시간 주행 효율 샘플 버퍼]
   final List<_DrivingSample> _recent1MinSamples = [];
   double _recent1MinEfficiency = 5.7;
   int _efficiencyScore = 50;
 
-  // 💡 [이번 주행(D, R) 순수 누적 에너지 및 거리]
   double _pureDriveEnergyKwh = 0.0;
   double _pureDriveDistanceKm = 0.0;
   double _pureDriveTripEfficiency = 5.7;
 
-  // 누적 통계
   double _accumulatedRegenKwh = 0.0;
   double _driveEnergyKwh = 0.0;
   double _hvacEnergyKwh = 0.0;
@@ -101,10 +98,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
   void initState() {
     super.initState();
     _startDrivingTimer();
-    _connectToLogger();
-    _autoConnectTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
+    _connectDirectlyToLogger();
+    // 2초 간격으로 자동 연결 감시 (단독 연결 유지)
+    _autoConnectTimer = Timer.periodic(const Duration(seconds: 2), (timer) {
       if (!_isConnected && !_isConnecting) {
-        _connectToLogger();
+        _connectDirectlyToLogger();
       }
     });
   }
@@ -118,10 +116,29 @@ class _DashboardScreenState extends State<DashboardScreen> {
     super.dispose();
   }
 
+  // 💡 [순정 로거 단독 깨우기 및 스트림 활성화 핸드셰이크]
+  void _sendWakeupHandshake() {
+    if (_connection == null || !_connection!.isConnected) return;
+
+    try {
+      // 1. ELM327 계열 텍스트 기동 시퀀스
+      _connection!.output.add(ascii.encode("ATZ\r\n"));
+      _connection!.output.add(ascii.encode("ATE0\r\n"));
+      _connection!.output.add(ascii.encode("ATH1\r\n"));
+      _connection!.output.add(ascii.encode("ATSP6\r\n"));
+      _connection!.output.add(ascii.encode("ATMA\r\n"));
+
+      // 2. 바이너리 순정 로거 기동 프레임 주입
+      _connection!.output.add(Uint8List.fromList([0xAA, 0x55, 0x01, 0x01, 0x00, 0x00]));
+      _connection!.output.add(Uint8List.fromList([0xAA, 0x55, 0x02, 0x00, 0x00, 0x00]));
+      _connection!.output.allSent;
+    } catch (_) {}
+  }
+
   void _startHeartbeat() {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (_isConnected && _connection != null) {
+      if (_isConnected && _connection != null && _connection!.isConnected) {
         try {
           _connection!.output.add(Uint8List.fromList([0xAA, 0x55, 0x01, 0x00, 0x00, 0x00]));
           _connection!.output.add(ascii.encode("AT\r\n"));
@@ -131,7 +148,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
     });
   }
 
-  Future<void> _connectToLogger() async {
+  // 💡 [순정 앱 불필요 - 단독 다이렉트 RFCOMM 소켓 연결 엔진]
+  Future<void> _connectDirectlyToLogger() async {
     if (_isConnected || _isConnecting) return;
     if (mounted) setState(() => _isConnecting = true);
 
@@ -142,12 +160,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
           _connection!.dispose();
         } catch (_) {}
         _connection = null;
-        await Future.delayed(const Duration(milliseconds: 300));
+        await Future.delayed(const Duration(milliseconds: 200));
       }
 
       List<BluetoothDevice> devices = await FlutterBluetoothSerial.instance.getBondedDevices();
       BluetoothDevice? targetDevice;
 
+      // 1순위: F0D6 등 순정 로거 ID 매칭
       for (var d in devices) {
         String name = (d.name ?? '').toUpperCase();
         if (name.contains('F0D6') || name.contains('OBD') || name.contains('EV') || name.contains('MASADA') || name.contains('LOGGER')) {
@@ -159,7 +178,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
       targetDevice ??= devices.isNotEmpty ? devices.first : null;
 
       if (targetDevice != null) {
+        // 단독 RFCOMM 소켓 직접 오픈
         _connection = await BluetoothConnection.toAddress(targetDevice.address);
+        
+        // 연결 즉시 모듈 활성화 명령 전송
+        _sendWakeupHandshake();
         _startHeartbeat();
 
         if (mounted) {
@@ -246,7 +269,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   bool _dispatchCanMessage(int id, List<int> d) {
     if (d.length < 8) return false;
 
-    // 1. BMS_VCU_0 (BO_ 2365553923 = 0x0CFF7D03)
+    // 1. BMS_VCU_0 (0x0CFF7D03)
     if (id == 0x0CFF7D03) {
       int rawSoc = d[1];
       if (rawSoc > 0 && rawSoc <= 200) {
@@ -261,7 +284,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 2. BMS_VCU_1 (BO_ 2365554179 = 0x0CFF7E03)
+    // 2. BMS_VCU_1 (0x0CFF7E03)
     if (id == 0x0CFF7E03) {
       int rawSoh = d[1];
       if (rawSoh >= 50 && rawSoh <= 100) _soh = rawSoh;
@@ -295,7 +318,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 3. VCU_Meter (BO_ 2566904833 = 0x19014801 / 0x18FF50E5 / 0x18FFDC01)
+    // 3. VCU_Meter (0x19014801 / 0x18FF50E5 / 0x18FFDC01)
     if (id == 0x19014801 || id == 0x18FF50E5 || id == 0x18FFDC01 || id == 0x09014801) {
       int rawGear = (d[4] >> 2) & 0x03;
       if (rawGear == 0) {
@@ -316,7 +339,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 4. Meter_VCU_1 (BO_ 2566839509 = 0x190048D5 / 0x18FEDCD5)
+    // 4. Meter_VCU_1 (0x190048D5 / 0x18FEDCD5)
     if (id == 0x190048D5 || id == 0x18FEDCD5 || id == 0x090048D5) {
       _realVehicleSpeedKmh = d[0].toDouble();
 
@@ -332,7 +355,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 5. BMS_VCU_4 (BO_ 2365554947 = 0x0CFF8103)
+    // 5. BMS_VCU_4 (0x0CFF8103)
     if (id == 0x0CFF8103) {
       _isWaterAlarm = (d[6] & 0x01) != 0;
       if (mounted) setState(() {});
@@ -348,7 +371,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
         setState(() {
           _drivingSeconds++;
 
-          // N단 60초 지속 시 자동 캠핑모드
           if (_currentGear == "N" || (_realVehicleSpeedKmh < 0.5 && _powerKw.abs() < 0.3)) {
             _neutralDurationSeconds++;
             if (_neutralDurationSeconds >= 60 && !_isCampingMode) {
@@ -383,7 +405,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
               _accumulatedRealTripKm += secondDistKm;
             }
 
-            // 💡 [D, R 기어 상태일 때만 순수 주행 전비 연산에 누적]
             if (_currentGear == "D" || _currentGear == "R") {
               if (_powerKw > 0.1) {
                 _pureDriveEnergyKwh += (_powerKw / 3600.0);
@@ -402,11 +423,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
     });
   }
 
-  // 💡 [1분 실시간 효율 및 복합 전비 BMS 주행가능거리 연산]
   void _update1MinEfficiencyAndBmsDistance() {
     double speed = _realVehicleSpeedKmh > 0.5 ? _realVehicleSpeedKmh : (_powerKw > 1.0 ? (_powerKw * 4.5).clamp(10.0, 100.0) : 0.0);
 
-    // 1분(60초) 샘플링
     _recent1MinSamples.add(_DrivingSample(_powerKw, speed));
     if (_recent1MinSamples.length > 60) {
       _recent1MinSamples.removeAt(0);
@@ -427,7 +446,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     double rawScore = ((_recent1MinEfficiency - 3.7) / (7.7 - 3.7)) * 100.0;
     _efficiencyScore = rawScore.clamp(0.0, 100.0).round();
 
-    // 💡 [수정 요청 1]: 30%는 배터리 1% * 2.4km, 나머지 70%는 이번 순수 주행 전비(D, R)
     double baseDistance30Pct = (_soc * 2.4) * 0.3;
     double currentRemainKwh = (_batteryTotalKwh * (_soh / 100.0)) * (_soc / 100.0);
     double dynamicDistance70Pct = (currentRemainKwh * _pureDriveTripEfficiency) * 0.7;
@@ -686,7 +704,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ),
             const SizedBox(width: 8),
             GestureDetector(
-              onTap: _connectToLogger,
+              onTap: _connectDirectlyToLogger,
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
                 decoration: BoxDecoration(
@@ -892,7 +910,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ),
         const SizedBox(height: 10),
-        // 💡 [수정 요청 1: 복합 전비 기반 BMS 주행가능거리]
         Expanded(
           child: _buildCard(
             title: "BMS 주행가능거리 (복합 전비)",
@@ -905,7 +922,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  // 💡 [수정 요청 3: 이번 주행 순수 전비(D, R)를 중앙 게이지에 표시]
   Widget _buildCenterSocGauge() {
     Color effThemeColor = _getEfficiencyColor(_efficiencyScore);
     return Container(
@@ -959,7 +975,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  // 💡 [수정 요청 2: 우측 상단에 '실시간 주행 효율(1분)' 배치]
   Widget _buildRightPanel() {
     Color effThemeColor = _getEfficiencyColor(_efficiencyScore);
     double regenKw = _current < 0 ? _chargePowerKw : 0.0;
@@ -972,7 +987,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     return Column(
       children: [
-        // 💡 [우측 상단: 실시간 주행 효율 (1분 주기 점수 & 뱃지)]
         Expanded(
           child: Container(
             width: double.infinity,
@@ -1031,7 +1045,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ),
         const SizedBox(height: 10),
-        // [우측 하단: 회생 이득 및 주행/공조 비율 유지]
         Expanded(
           child: Container(
             width: double.infinity,
@@ -1252,7 +1265,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  // 💡 [수정 요청 2: 하단 바 중앙에 '실시간 충전량' 컴팩트 배치]
   Widget _buildExtendedAdvancedBar() {
     double avgLoadPct = _loadSampleCount > 0 ? (_accumulatedLoadPct / _loadSampleCount) : 0.0;
     Map<String, dynamic> cellBal = _getCellBalanceStatus();
@@ -1265,7 +1277,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        // 1. 이번주행 평균 부하율
         Expanded(
           flex: 32,
           child: _buildExtendedCard(
@@ -1293,7 +1304,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ),
         const SizedBox(width: 6),
-        // 💡 [2. 하단 중앙으로 이동한 실시간 충전/회생 상태 카드]
         Expanded(
           flex: 38,
           child: _buildExtendedCard(
@@ -1334,7 +1344,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ),
         const SizedBox(width: 6),
-        // 3. 셀 밸런싱 편차 게이지
         Expanded(
           flex: 30,
           child: _buildExtendedCard(
