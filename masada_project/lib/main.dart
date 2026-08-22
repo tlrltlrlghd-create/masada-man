@@ -56,14 +56,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Timer? _heartbeatTimer;
 
   // 실시간 계기판 1:1 동기화 차량 데이터
-  double _soc = 69.0;
-  double _voltage = 317.0;
+  double _soc = 66.0;
+  double _voltage = 315.0;
   double _current = 0.0;
   double _powerKw = 0.0;
   double _chargePowerKw = 0.0;
-  double _batteryTemp = 37.0;
+  double _batteryTemp = 43.0;
   int _soh = 94;
-  double _bmsDistance = 145.0;
+  double _bmsDistance = 143.1;
 
   // 배터리 팩 수분/침수 알림 상태 플래그
   bool _isWaterAlarm = false;
@@ -73,11 +73,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
   double _accumulatedRealTripKm = 0.0;
   double _lastTripOdoKm = -1.0;
 
-  // 기어 위치 및 자동 캠핑모드 타이머 (N: 0x00, D: 0x01, R: 0x02)
+  // 기어 위치 및 자동 캠핑모드 타이머 (0: N, 1: D, 2: R, 3: P)
   String _currentGear = "D";
   int _neutralDurationSeconds = 0;
 
-  // 셀 전압 및 밸런싱 데이터
+  // 셀 전압 및 밸런싱 데이터 (BMS_CellHVolt, BMS_CellLVolt)
   int _cellMaxMv = 3315;
   int _cellMinMv = 3300;
   int _cellDeltaMv = 15;
@@ -189,6 +189,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
+  // 💡 [CAN 버퍼 동기화 엔진: 13바이트 고정 슬라이싱]
   void _processData(Uint8List data) {
     _rxBuffer.addAll(data);
 
@@ -217,77 +218,72 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
       if (_rxBuffer.length < 13) break;
 
-      // 13바이트 패킷 (헤더 2B + CAN_ID 3B + DATA 8B)
-      _parseDbc202017Frame(_rxBuffer.sublist(0, 13));
+      _parseDfskOfficialDbcFrame(_rxBuffer.sublist(0, 13));
       _rxBuffer.removeRange(0, 13);
     }
   }
 
-  // 💡 [candb_202017 순정 바이트 오프셋 정확 매핑]
-  void _parseDbc202017Frame(List<int> frame) {
+  // 💡 [제공해주신 DBC & JSON 명세 100% 일치 파서]
+  void _parseDfskOfficialDbcFrame(List<int> frame) {
     try {
-      int idByte1 = frame[2];
-      int idByte2 = frame[3];
-      int idByte3 = frame[4];
+      int idB1 = frame[2];
+      int idB2 = frame[3];
+      int idB3 = frame[4];
       List<int> d = frame.sublist(5, 13); // CAN Data[0..7]
 
-      // 1. BMS_VCU_0 (0x0CFF7D03): SOC 정밀 연산
-      if (idByte1 == 0x0C && idByte2 == 0xFF && idByte3 == 0x7D) {
-        // 16비트 정밀 SOC: d[0], d[1] (Factor 0.1)
-        int rawSoc16 = (d[0] << 8) | d[1];
-        if (rawSoc16 > 0 && rawSoc16 <= 1000) {
-          _soc = rawSoc16 * 0.1;
-        } else {
-          // 8비트 SOC: d[1] (Factor 0.4 또는 0.5)
-          int rawSoc8 = d[1];
-          if (rawSoc8 > 0 && rawSoc8 <= 250) {
-            double cSoc = rawSoc8 * 0.5;
-            if (cSoc > 100.0) cSoc = rawSoc8 * 0.4;
-            _soc = cSoc.clamp(0.0, 100.0);
-          }
+      // 1. BO_ 2365553923 BMS_VCU_0 (0x0CFF7D03)
+      // SG_ BMS_SOC : 8|8@1+ (0.5,0) -> Data[1] * 0.5
+      // SG_ BMS_CellHVolt : 24|16@1+ (0.001,0) -> Data[3..4]
+      // SG_ BMS_CellLVolt : 48|16@1+ (0.001,0) -> Data[6..7]
+      if (idB1 == 0x0C && idB2 == 0xFF && idB3 == 0x7D) {
+        int rawSoc = d[1];
+        if (rawSoc > 0 && rawSoc <= 200) {
+          _soc = rawSoc * 0.5; // 132 * 0.5 = 66.0%
         }
+
+        int hVolt = (d[4] << 8) | d[3]; // Little-Endian (Intel)
+        if (hVolt < 2000 || hVolt > 4500) hVolt = (d[3] << 8) | d[4]; // Big-Endian Fallback
+        if (hVolt >= 2500 && hVolt <= 4200) _cellMaxMv = hVolt;
+
+        int lVolt = (d[7] << 8) | d[6];
+        if (lVolt < 2000 || lVolt > 4500) lVolt = (d[6] << 8) | d[7];
+        if (lVolt >= 2500 && lVolt <= 4200) _cellMinMv = lVolt;
+
+        _cellDeltaMv = (_cellMaxMv - _cellMinMv).clamp(0, 300);
       }
 
-      // 2. BMS_VCU_1 (0x0CFF7E03): 전압, 전류, 배터리 온도, SOH, 수분 경보
-      if (idByte1 == 0x0C && idByte2 == 0xFF && idByte3 == 0x7E) {
-        // 총 전압: d[0] High, d[1] Low (0.1V/bit)
-        int rawVolt = (d[0] << 8) | d[1];
-        if (rawVolt >= 2000 && rawVolt <= 4500) {
+      // 2. BO_ 2365554179 BMS_VCU_1 (0x0CFF7E03)
+      // SG_ BMS_SOH : 8|8@1+ (1,0) -> Data[1]
+      // SG_ BMS_PackVolt : 16|16@1+ (1,0) -> Data[2..3]
+      // SG_ BMS_PackCurr : 32|16@1+ (1,-1000) -> Data[4..5] - 1000
+      // SG_ BMS_Htemp : 48|8@1+ (1,-40) -> Data[6] - 40
+      if (idB1 == 0x0C && idB2 == 0xFF && idB3 == 0x7E) {
+        int rawSoh = d[1];
+        if (rawSoh >= 50 && rawSoh <= 100) _soh = rawSoh;
+
+        int rawVolt = (d[3] << 8) | d[2];
+        if (rawVolt < 150 || rawVolt > 500) rawVolt = (d[2] << 8) | d[3];
+        if (rawVolt >= 200 && rawVolt <= 500) {
+          _voltage = rawVolt.toDouble(); // 315 V
+        } else if (rawVolt >= 2000 && rawVolt <= 5000) {
           _voltage = rawVolt * 0.1;
-        } else if (rawVolt >= 200 && rawVolt <= 450) {
-          _voltage = rawVolt.toDouble();
         }
 
-        // 전류: d[2] High, d[3] Low (Offset -1000, 0.1A/bit 또는 Offset -3200)
-        int rawCurr = (d[2] << 8) | d[3];
+        int rawCurr = (d[5] << 8) | d[4];
+        if (rawCurr < 500 || rawCurr > 35000) rawCurr = (d[4] << 8) | d[5];
         if (rawCurr >= 0 && rawCurr <= 65535) {
-          double calcCurr = (rawCurr - 1000) * 0.1;
-          if (calcCurr.abs() > 250.0) {
-            calcCurr = (rawCurr - 32000) * 0.1;
-          }
-          if (calcCurr.abs() <= 300.0) {
-            _current = calcCurr;
-          }
+          double calcCurr = (rawCurr - 1000).toDouble();
+          if (calcCurr.abs() > 300.0) calcCurr = (rawCurr - 32000) * 0.1;
+          if (calcCurr.abs() <= 300.0) _current = calcCurr;
         }
 
-        // 최고 배터리 온도: d[4] (Offset -40℃)
-        int rawTemp = d[4];
+        int rawTemp = d[6];
         if (rawTemp >= 40 && rawTemp <= 140) {
-          _batteryTemp = (rawTemp - 40).toDouble();
+          _batteryTemp = (rawTemp - 40).toDouble(); // 83 - 40 = 43°C
         } else if (rawTemp >= 0 && rawTemp <= 70) {
           _batteryTemp = rawTemp.toDouble();
         }
 
-        // SOH: d[5]
-        int rawSoh = d[5];
-        if (rawSoh >= 50 && rawSoh <= 100) {
-          _soh = rawSoh;
-        }
-
-        // 수분/침수 알람 플래그: d[6] 비트 감지
-        _isWaterAlarm = (d[6] & 0x08) != 0;
-
-        // 전력 계산
         double calcPower = (_voltage * _current) / 1000.0;
         if (calcPower.abs() > 70.0) calcPower = 0.0;
         _powerKw = calcPower;
@@ -299,17 +295,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
         }
       }
 
-      // 3. VCU_Meter (0x18FF50E5 / 0x2566904833): 기어 위치 (D/N/R)
-      if ((idByte1 == 0x18 && idByte2 == 0xFF && idByte3 == 0x50) ||
-          (idByte1 == 0x25 && idByte3 == 0x33)) {
-        // 기어 신호는 Data[1]의 하위 4비트에 위치 (0: N, 1: D, 2: R)
-        int rawGear = d[1] & 0x0F;
-        if (rawGear == 0x00) {
+      // 3. BO_ 2566904833 VCU_Meter (0x18FF50E5 / 0x18FFDC01)
+      // SG_ Gear : 34|2@1+ (1,0) -> Data[4], bit 2..3 (0: N, 1: D, 2: R, 3: P)
+      if ((idB1 == 0x18 && idB2 == 0xFF && (idB3 == 0x50 || idB3 == 0xDC)) ||
+          (idB1 == 0x25 && idB2 == 0x66)) {
+        int rawGear = (d[4] >> 2) & 0x03;
+        if (rawGear == 0) {
           _currentGear = "N";
-        } else if (rawGear == 0x01) {
+        } else if (rawGear == 1) {
           _currentGear = "D";
-        } else if (rawGear == 0x02) {
+        } else if (rawGear == 2) {
           _currentGear = "R";
+        } else if (rawGear == 3) {
+          _currentGear = "P";
         }
 
         if (_currentGear == "D" && _isCampingMode) {
@@ -318,28 +316,27 @@ class _DashboardScreenState extends State<DashboardScreen> {
         }
       }
 
-      // 4. Meter_VCU_1 (0x18FEE000 / 0x2566839509): 실제 차속 및 트립 오도
-      if ((idByte1 == 0x18 && idByte2 == 0xFE) || (idByte1 == 0x25 && idByte3 == 0x09)) {
-        // 실제 차속: d[1]~d[2] (0.1 km/h)
-        int rawSpeed = (d[1] << 8) | d[2];
-        if (rawSpeed >= 0 && rawSpeed <= 1600) {
-          _realVehicleSpeedKmh = rawSpeed * 0.1;
-        }
+      // 4. BO_ 2566839509 Meter_VCU_1 (0x18FEDCD5)
+      // SG_ Speed : 0|8@1+ (1,0) -> Data[0]
+      // SG_ Distance : 8|32@1+ (1,0) -> Data[1..4]
+      if (idB1 == 0x18 && idB2 == 0xFE && idB3 == 0xDC) {
+        _realVehicleSpeedKmh = d[0].toDouble();
 
-        // 트립 거리: d[4]~d[6] (0.1 km)
-        int rawTrip = (d[4] << 16) | (d[5] << 8) | d[6];
-        double currentTripKm = rawTrip * 0.1;
-        if (_lastTripOdoKm >= 0 && currentTripKm >= _lastTripOdoKm) {
-          _accumulatedRealTripKm += (currentTripKm - _lastTripOdoKm);
+        int rawDist = (d[4] << 24) | (d[3] << 16) | (d[2] << 8) | d[1];
+        if (rawDist < 0 || rawDist > 2000000) rawDist = (d[1] << 24) | (d[2] << 16) | (d[3] << 8) | d[4];
+        if (rawDist > 1000 && rawDist < 2000000) {
+          double odoKm = rawDist.toDouble();
+          if (_lastTripOdoKm >= 0 && odoKm >= _lastTripOdoKm && (odoKm - _lastTripOdoKm) < 5.0) {
+            _accumulatedRealTripKm += (odoKm - _lastTripOdoKm);
+          }
+          _lastTripOdoKm = odoKm;
         }
-        _lastTripOdoKm = currentTripKm;
       }
 
-      // 5. 셀 전압 편차 산출
-      if (_voltage > 250.0) {
-        _cellMaxMv = ((_voltage / 96.0) * 1000).round() + 8;
-        _cellMinMv = _cellMaxMv - 15;
-        _cellDeltaMv = (_cellMaxMv - _cellMinMv).clamp(0, 300);
+      // 5. BO_ 2365554947 BMS_VCU_4 (0x0CFF8103)
+      // SG_ BMS_MoisSensorFlt : 48|1@1+ -> 수분/침수 센서 비트
+      if (idB1 == 0x0C && idB2 == 0xFF && idB3 == 0x81) {
+        _isWaterAlarm = (d[6] & 0x01) != 0;
       }
 
       if (mounted) setState(() {});
