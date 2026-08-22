@@ -4,7 +4,6 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -124,7 +123,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   void initState() {
     super.initState();
-    _loadSavedTheme();
     _startDrivingTimer();
     _connectToLogger();
     _autoConnectTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
@@ -143,19 +141,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
     super.dispose();
   }
 
-  Future<void> _loadSavedTheme() async {
-    final prefs = await SharedPreferences.getInstance();
-    setState(() {
-      _currentThemeIndex = prefs.getInt('saved_dashboard_theme') ?? 0;
-    });
-  }
-
-  Future<void> _toggleTheme() async {
-    final prefs = await SharedPreferences.getInstance();
+  void _toggleTheme() {
     setState(() {
       _currentThemeIndex = (_currentThemeIndex + 1) % 4;
     });
-    await prefs.setInt('saved_dashboard_theme', _currentThemeIndex);
   }
 
   void _startHeartbeat() {
