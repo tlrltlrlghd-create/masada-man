@@ -184,12 +184,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
-  // 💡 [바이너리 + ASCII 통합 파서]
   void _processData(Uint8List data) {
     _rxBuffer.addAll(data);
     _asciiBuffer += String.fromCharCodes(data);
 
-    // 1. ASCII 텍스트 패킷 파싱 (ELM327 / 텍스트 로거 지원)
+    // 1. ASCII 라인 파싱
     if (_asciiBuffer.contains('\r') || _asciiBuffer.contains('\n')) {
       List<String> lines = _asciiBuffer.split(RegExp(r'[\r\n]+'));
       _asciiBuffer = lines.last;
@@ -198,83 +197,37 @@ class _DashboardScreenState extends State<DashboardScreen> {
       }
     }
 
-    // 2. 바이너리 스트림 슬라이딩 파싱 (0x0CFF / 0x18FF / 0x18FE 직접 검색)
-    if (_rxBuffer.length >= 12) {
+    // 2. 바이너리 스트림 파싱
+    while (_rxBuffer.length >= 12) {
+      bool matched = false;
       for (int i = 0; i <= _rxBuffer.length - 12; i++) {
-        // 0x0CFF7D03 또는 0x0CFF7E03 탐색
-        if (_rxBuffer[i] == 0x0C && _rxBuffer[i + 1] == 0xFF) {
-          int idSub = _rxBuffer[i + 2];
-          List<int> d = _rxBuffer.sublist(i + 4, i + 12);
+        // CAN ID 추출 (4바이트 Big-Endian / Little-Endian)
+        int idBig = ((_rxBuffer[i] << 24) | (_rxBuffer[i + 1] << 16) | (_rxBuffer[i + 2] << 8) | _rxBuffer[i + 3]) & 0x1FFFFFFF;
+        int idLittle = ((_rxBuffer[i + 3] << 24) | (_rxBuffer[i + 2] << 16) | (_rxBuffer[i + 1] << 8) | _rxBuffer[i]) & 0x1FFFFFFF;
+        
+        List<int> payload = _rxBuffer.sublist(i + 4, i + 12);
 
-          if (idSub == 0x7D) {
-            _decode0CFF7D(d);
-          } else if (idSub == 0x7E) {
-            _decode0CFF7E(d);
-          } else if (idSub == 0x81) {
-            _decode0CFF81(d);
-          }
+        if (_dispatchCanMessage(idBig, payload) || _dispatchCanMessage(idLittle, payload)) {
           _rxBuffer.removeRange(0, i + 12);
-          break;
-        }
-
-        // 0x18FFDC01 또는 0x18FF50E5 탐색
-        if (_rxBuffer[i] == 0x18 && _rxBuffer[i + 1] == 0xFF) {
-          int idSub = _rxBuffer[i + 2];
-          List<int> d = _rxBuffer.sublist(i + 4, i + 12);
-
-          if (idSub == 0xDC || idSub == 0x50) {
-            _decodeGear(d);
-          }
-          _rxBuffer.removeRange(0, i + 12);
-          break;
-        }
-
-        // 0x18FEDCD5 탐색 (속도)
-        if (_rxBuffer[i] == 0x18 && _rxBuffer[i + 1] == 0xFE && _rxBuffer[i + 2] == 0xDC) {
-          List<int> d = _rxBuffer.sublist(i + 4, i + 12);
-          _decodeSpeed(d);
-          _rxBuffer.removeRange(0, i + 12);
+          matched = true;
           break;
         }
       }
-
-      if (_rxBuffer.length > 512) {
-        _rxBuffer.removeRange(0, _rxBuffer.length - 128);
+      if (!matched) {
+        if (_rxBuffer.length > 256) _rxBuffer.removeRange(0, 128);
+        break;
       }
     }
   }
 
   void _parseAsciiLine(String line) {
     String clean = line.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '');
-    if (clean.length < 16) return;
+    if (clean.length < 24) return;
 
     try {
-      if (clean.startsWith('0CFF7D03') || clean.contains('0CFF7D')) {
-        String dataHex = clean.substring(clean.indexOf('0CFF7D') + 8);
-        if (dataHex.length >= 16) {
-          List<int> d = _hexToBytes(dataHex.substring(0, 16));
-          _decode0CFF7D(d);
-        }
-      } else if (clean.startsWith('0CFF7E03') || clean.contains('0CFF7E')) {
-        String dataHex = clean.substring(clean.indexOf('0CFF7E') + 8);
-        if (dataHex.length >= 16) {
-          List<int> d = _hexToBytes(dataHex.substring(0, 16));
-          _decode0CFF7E(d);
-        }
-      } else if (clean.contains('18FFDC') || clean.contains('18FF50')) {
-        int idx = clean.contains('18FFDC') ? clean.indexOf('18FFDC') : clean.indexOf('18FF50');
-        String dataHex = clean.substring(idx + 8);
-        if (dataHex.length >= 16) {
-          List<int> d = _hexToBytes(dataHex.substring(0, 16));
-          _decodeGear(d);
-        }
-      } else if (clean.contains('18FEDC')) {
-        String dataHex = clean.substring(clean.indexOf('18FEDC') + 8);
-        if (dataHex.length >= 16) {
-          List<int> d = _hexToBytes(dataHex.substring(0, 16));
-          _decodeSpeed(d);
-        }
-      }
+      int id = int.parse(clean.substring(0, 8), radix: 16) & 0x1FFFFFFF;
+      List<int> payload = _hexToBytes(clean.substring(8, 24));
+      _dispatchCanMessage(id, payload);
     } catch (_) {}
   }
 
@@ -286,100 +239,107 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return bytes;
   }
 
-  // 💡 [0x0CFF7D03 디코더: BMS_SOC, BMS_CellHVolt, BMS_CellLVolt]
-  void _decode0CFF7D(List<int> d) {
-    if (d.length < 8) return;
-    int rawSoc = d[1];
-    if (rawSoc > 0 && rawSoc <= 200) {
-      _soc = rawSoc * 0.5;
+  // 💡 [DBC 원본 기준 메시지 라우터]
+  bool _dispatchCanMessage(int id, List<int> d) {
+    if (d.length < 8) return false;
+
+    // 1. BMS_VCU_0 (BO_ 2365553923 = 0x0CFF7D03)
+    if (id == 0x0CFF7D03) {
+      int rawSoc = d[1];
+      if (rawSoc > 0 && rawSoc <= 200) {
+        _soc = rawSoc * 0.5;
+      }
+      int hVolt = (d[4] << 8) | d[3];
+      int lVolt = (d[7] << 8) | d[6];
+      if (hVolt >= 2500 && hVolt <= 4200) _cellMaxMv = hVolt;
+      if (lVolt >= 2500 && lVolt <= 4200) _cellMinMv = lVolt;
+      _cellDeltaMv = (_cellMaxMv - _cellMinMv).clamp(0, 300);
+      if (mounted) setState(() {});
+      return true;
     }
 
-    int hVolt = (d[4] << 8) | d[3];
-    if (hVolt < 2000 || hVolt > 4500) hVolt = (d[3] << 8) | d[4];
-    if (hVolt >= 2500 && hVolt <= 4200) _cellMaxMv = hVolt;
+    // 2. BMS_VCU_1 (BO_ 2365554179 = 0x0CFF7E03)
+    if (id == 0x0CFF7E03) {
+      int rawSoh = d[1];
+      if (rawSoh >= 50 && rawSoh <= 100) _soh = rawSoh;
 
-    int lVolt = (d[7] << 8) | d[6];
-    if (lVolt < 2000 || lVolt > 4500) lVolt = (d[6] << 8) | d[7];
-    if (lVolt >= 2500 && lVolt <= 4200) _cellMinMv = lVolt;
+      int rawVolt = (d[3] << 8) | d[2];
+      if (rawVolt >= 200 && rawVolt <= 500) {
+        _voltage = rawVolt.toDouble();
+      }
 
-    _cellDeltaMv = (_cellMaxMv - _cellMinMv).clamp(0, 300);
-    if (mounted) setState(() {});
-  }
+      int rawCurr = (d[5] << 8) | d[4];
+      if (rawCurr >= 0 && rawCurr <= 65535) {
+        double calcCurr = (rawCurr - 1000).toDouble();
+        if (calcCurr.abs() <= 300.0) _current = calcCurr;
+      }
 
-  // 💡 [0x0CFF7E03 디코더: SOH, PackVolt, PackCurr, HTemp]
-  void _decode0CFF7E(List<int> d) {
-    if (d.length < 8) return;
-    int rawSoh = d[1];
-    if (rawSoh >= 50 && rawSoh <= 100) _soh = rawSoh;
+      int rawTemp = d[6];
+      if (rawTemp >= 40 && rawTemp <= 140) {
+        _batteryTemp = (rawTemp - 40).toDouble();
+      }
 
-    int rawVolt = (d[3] << 8) | d[2];
-    if (rawVolt < 150 || rawVolt > 500) rawVolt = (d[2] << 8) | d[3];
-    if (rawVolt >= 200 && rawVolt <= 500) {
-      _voltage = rawVolt.toDouble();
-    } else if (rawVolt >= 2000 && rawVolt <= 5000) {
-      _voltage = rawVolt * 0.1;
+      double calcPower = (_voltage * _current) / 1000.0;
+      if (calcPower.abs() > 70.0) calcPower = 0.0;
+      _powerKw = calcPower;
+
+      if (_current < -0.5) {
+        _chargePowerKw = calcPower.abs();
+      } else {
+        _chargePowerKw = 0.0;
+      }
+      if (mounted) setState(() {});
+      return true;
     }
 
-    int rawCurr = (d[5] << 8) | d[4];
-    if (rawCurr < 500 || rawCurr > 35000) rawCurr = (d[4] << 8) | d[5];
-    if (rawCurr >= 0 && rawCurr <= 65535) {
-      double calcCurr = (rawCurr - 1000).toDouble();
-      if (calcCurr.abs() > 300.0) calcCurr = (rawCurr - 32000) * 0.1;
-      if (calcCurr.abs() <= 300.0) _current = calcCurr;
+    // 3. VCU_Meter (BO_ 2566904833 = 0x19014801 / 0x18FF50E5 / 0x18FFDC01)
+    // SG_ Gear : 34|2@1+ -> d[4] bit 2..3 (0: N, 1: D, 2: R, 3: P)
+    if (id == 0x19014801 || id == 0x18FF50E5 || id == 0x18FFDC01 || id == 0x09014801) {
+      int rawGear = (d[4] >> 2) & 0x03;
+      if (rawGear == 0) {
+        _currentGear = "N";
+      } else if (rawGear == 1) {
+        _currentGear = "D";
+      } else if (rawGear == 2) {
+        _currentGear = "R";
+      } else if (rawGear == 3) {
+        _currentGear = "P";
+      }
+
+      if (_currentGear == "D" && _isCampingMode) {
+        _isCampingMode = false;
+        _neutralDurationSeconds = 0;
+      }
+      if (mounted) setState(() {});
+      return true;
     }
 
-    int rawTemp = d[6];
-    if (rawTemp >= 40 && rawTemp <= 140) {
-      _batteryTemp = (rawTemp - 40).toDouble();
-    } else if (rawTemp >= 0 && rawTemp <= 70) {
-      _batteryTemp = rawTemp.toDouble();
+    // 4. Meter_VCU_1 (BO_ 2566839509 = 0x190048D5 / 0x18FEDCD5)
+    // SG_ Speed : 0|8@1+ -> d[0]
+    // SG_ Distance : 8|32@1+ -> d[1..4]
+    if (id == 0x190048D5 || id == 0x18FEDCD5 || id == 0x090048D5) {
+      _realVehicleSpeedKmh = d[0].toDouble();
+
+      int rawDist = (d[4] << 24) | (d[3] << 16) | (d[2] << 8) | d[1];
+      if (rawDist > 1000 && rawDist < 2000000) {
+        double odoKm = rawDist.toDouble();
+        if (_lastTripOdoKm >= 0 && odoKm >= _lastTripOdoKm && (odoKm - _lastTripOdoKm) < 5.0) {
+          _accumulatedRealTripKm += (odoKm - _lastTripOdoKm);
+        }
+        _lastTripOdoKm = odoKm;
+      }
+      if (mounted) setState(() {});
+      return true;
     }
 
-    double calcPower = (_voltage * _current) / 1000.0;
-    if (calcPower.abs() > 70.0) calcPower = 0.0;
-    _powerKw = calcPower;
-
-    if (_current < -0.5) {
-      _chargePowerKw = calcPower.abs();
-    } else {
-      _chargePowerKw = 0.0;
-    }
-    if (mounted) setState(() {});
-  }
-
-  // 💡 [기어 디코더: 18FFDC01 / 18FF50E5 (0: N, 1: D, 2: R, 3: P)]
-  void _decodeGear(List<int> d) {
-    if (d.length < 5) return;
-    int rawGear = (d[4] >> 2) & 0x03;
-    if (rawGear == 0) {
-      _currentGear = "N";
-    } else if (rawGear == 1) {
-      _currentGear = "D";
-    } else if (rawGear == 2) {
-      _currentGear = "R";
-    } else if (rawGear == 3) {
-      _currentGear = "P";
+    // 5. BMS_VCU_4 (BO_ 2365554947 = 0x0CFF8103)
+    if (id == 0x0CFF8103) {
+      _isWaterAlarm = (d[6] & 0x01) != 0;
+      if (mounted) setState(() {});
+      return true;
     }
 
-    if (_currentGear == "D" && _isCampingMode) {
-      _isCampingMode = false;
-      _neutralDurationSeconds = 0;
-    }
-    if (mounted) setState(() {});
-  }
-
-  // 💡 [속도 디코더: 18FEDCD5]
-  void _decodeSpeed(List<int> d) {
-    if (d.isEmpty) return;
-    _realVehicleSpeedKmh = d[0].toDouble();
-    if (mounted) setState(() {});
-  }
-
-  // 💡 [수분 센서 장애 디코더: 0x0CFF8103]
-  void _decode0CFF81(List<int> d) {
-    if (d.length < 7) return;
-    _isWaterAlarm = (d[6] & 0x01) != 0;
-    if (mounted) setState(() {});
+    return false;
   }
 
   void _startDrivingTimer() {
