@@ -47,7 +47,7 @@ class DashboardScreen extends StatefulWidget {
 
 class _DashboardScreenState extends State<DashboardScreen> {
   bool _isCampingMode = false;
-  int _currentThemeIndex = 0; // 0: 테마 A (클래식 가로형), 1: 테마 B (운전자 집중 세로형)
+  int _currentThemeIndex = 0; // 0: 테마A, 1: 테마B, 2: 테마C(나이트), 3: 테마D(에코)
   static const double _batteryTotalKwh = 38.7;
 
   BluetoothConnection? _connection;
@@ -81,6 +81,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
   double _evapTemp = 15.0;
   double _envTemp = 25.0;
 
+  // 물리 풋브레이크 & 원페달
+  bool _isFootBrakePressed = false;
+  int _totalDecelSeconds = 0;
+  int _onePedalRegenSeconds = 0;
+  int _onePedalScorePct = 100;
+
+  // 테슬라 스타일 에너지 소비 4분할
+  double _energyDriveKwh = 0.0;
+  double _energyPtcKwh = 0.0;
+  double _energyAcKwh = 0.0;
+  double _energyStandbyKwh = 0.0;
+
   // 배터리 평생 실측 이력 데이터
   double _totalCumulativeChargeKwh = 0.0;
   int _chargeTimesCount = 0;
@@ -104,8 +116,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
   double _pureDriveTripEfficiency = 5.7;
 
   double _accumulatedRegenKwh = 0.0;
-  double _driveEnergyKwh = 0.0;
-  double _hvacEnergyKwh = 0.0;
   int _drivingSeconds = 0;
   int _loadSampleCount = 0;
   double _accumulatedLoadPct = 0.0;
@@ -133,7 +143,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     super.dispose();
   }
 
-  // 영구 저장된 테마 불러오기
   Future<void> _loadSavedTheme() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
@@ -141,11 +150,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
     });
   }
 
-  // 선택한 테마 영구 저장
   Future<void> _toggleTheme() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
-      _currentThemeIndex = (_currentThemeIndex == 0) ? 1 : 0;
+      _currentThemeIndex = (_currentThemeIndex + 1) % 4;
     });
     await prefs.setInt('saved_dashboard_theme', _currentThemeIndex);
   }
@@ -365,6 +373,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
         _ptcTemp = (rawPtc - 50).toDouble();
       }
 
+      _isFootBrakePressed = (d[4] & 0x01) != 0;
+
       if (mounted) setState(() {});
       return true;
     }
@@ -428,13 +438,43 @@ class _DashboardScreenState extends State<DashboardScreen> {
             if (_current < -0.5 && _chargePowerKw > 0.1) {
               _accumulatedRegenKwh += (_chargePowerKw / 3600.0);
             }
-            if (_powerKw > 1.0) {
-              _driveEnergyKwh += (_powerKw / 3600.0);
+
+            if (_powerKw > 0.05) {
+              double secKwh = _powerKw / 3600.0;
+              if (_ptcTemp > _envTemp + 10.0) {
+                double ptcEstKw = ((_ptcTemp - _envTemp) / 40.0 * 3.5).clamp(0.5, 4.0);
+                double ptcSec = (ptcEstKw / 3600.0).clamp(0.0, secKwh);
+                _energyPtcKwh += ptcSec;
+                secKwh -= ptcSec;
+              }
+              if (_evapTemp < 12.0 && secKwh > 0) {
+                double acEstKw = ((20.0 - _evapTemp) / 15.0 * 2.0).clamp(0.4, 2.5);
+                double acSec = (acEstKw / 3600.0).clamp(0.0, secKwh);
+                _energyAcKwh += acSec;
+                secKwh -= acSec;
+              }
+              if (secKwh > 0) {
+                double stdbySec = (0.3 / 3600.0).clamp(0.0, secKwh);
+                _energyStandbyKwh += stdbySec;
+                secKwh -= stdbySec;
+              }
+              if (secKwh > 0) {
+                _energyDriveKwh += secKwh;
+              }
+
               double liveLoad = (_powerKw / 60.0 * 100.0).clamp(0.0, 100.0);
               _accumulatedLoadPct += liveLoad;
               _loadSampleCount++;
-            } else if (_powerKw > 0.05) {
-              _hvacEnergyKwh += (_powerKw / 3600.0);
+            }
+
+            if (_realVehicleSpeedKmh > 5.0 && _powerKw <= 0.0) {
+              _totalDecelSeconds++;
+              if (!_isFootBrakePressed) {
+                _onePedalRegenSeconds++;
+              }
+              if (_totalDecelSeconds > 0) {
+                _onePedalScorePct = ((_onePedalRegenSeconds / _totalDecelSeconds) * 100).round().clamp(0, 100);
+              }
             }
 
             if (secondDistKm > 0.0) {
@@ -596,7 +636,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return {'carnival': 0, 'masada': 0, 'saved': 0};
     }
     double carnivalCost = _accumulatedRealTripKm * (1800.0 / 7.0);
-    double totalConsumedKwh = _driveEnergyKwh + _hvacEnergyKwh;
+    double totalConsumedKwh = _energyDriveKwh + _energyPtcKwh + _energyAcKwh + _energyStandbyKwh;
     double masadaCost = totalConsumedKwh * 300.0;
     double saved = carnivalCost - masadaCost;
 
@@ -625,6 +665,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
     } else {
       return {'text': '과부하', 'color': const Color(0xFFFF5252)};
     }
+  }
+
+  Map<String, int> _calculateEnergyDistribution() {
+    double total = _energyDriveKwh + _energyPtcKwh + _energyAcKwh + _energyStandbyKwh;
+    if (total < 0.01) {
+      return {'drive': 85, 'ptc': 5, 'ac': 5, 'stdby': 5};
+    }
+    int d = ((_energyDriveKwh / total) * 100).round();
+    int p = ((_energyPtcKwh / total) * 100).round();
+    int a = ((_energyAcKwh / total) * 100).round();
+    int s = (100 - d - p - a).clamp(0, 100);
+    return {'drive': d, 'ptc': p, 'ac': a, 'stdby': s};
   }
 
   void _showBatteryManagementDialog() {
@@ -753,7 +805,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     ? _buildCampingDashboard()
                     : (_currentThemeIndex == 0
                         ? _buildThemeAStandardDashboard()
-                        : _buildThemeBDriverDashboard()),
+                        : (_currentThemeIndex == 1
+                            ? _buildThemeBDriverDashboard()
+                            : (_currentThemeIndex == 2
+                                ? _buildThemeCNightDashboard()
+                                : _buildThemeDEcoDashboard()))),
               ),
               if (!_isCampingMode && _currentThemeIndex == 0) ...[
                 const SizedBox(height: 4),
@@ -771,6 +827,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Widget _buildHeader() {
+    String themeLabel = "테마 A(가로)";
+    if (_currentThemeIndex == 1) themeLabel = "테마 B(세로)";
+    else if (_currentThemeIndex == 2) themeLabel = "테마 C(나이트)";
+    else if (_currentThemeIndex == 3) themeLabel = "테마 D(에코)";
+
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
@@ -822,11 +883,27 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 ),
               ),
             ),
+            const SizedBox(width: 8),
+            if (_isFootBrakePressed)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                decoration: BoxDecoration(
+                  color: Colors.redAccent.withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: Colors.redAccent, width: 1.0),
+                ),
+                child: const Row(
+                  children: [
+                    Icon(Icons.stop_circle_outlined, color: Colors.redAccent, size: 12),
+                    SizedBox(width: 3),
+                    Text("🛑 풋브레이크 개입", style: TextStyle(color: Colors.redAccent, fontSize: 11, fontWeight: FontWeight.bold)),
+                  ],
+                ),
+              ),
           ],
         ),
         Row(
           children: [
-            // 💡 [테마 전환 버튼: 테마 A / 테마 B 영구 저장 연동]
             GestureDetector(
               onTap: _toggleTheme,
               child: Container(
@@ -841,7 +918,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     const Icon(Icons.palette_outlined, color: Colors.purpleAccent, size: 14),
                     const SizedBox(width: 4),
                     Text(
-                      _currentThemeIndex == 0 ? "테마 A (가로)" : "테마 B (세로)",
+                      themeLabel,
                       style: const TextStyle(color: Colors.purpleAccent, fontSize: 12, fontWeight: FontWeight.bold),
                     ),
                   ],
@@ -943,10 +1020,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Row(
       children: [
         Expanded(flex: 25, child: _buildThemeALeftPanel()),
-        const SizedBox(width: 10),
-        Expanded(flex: 50, child: _buildThemeACenterSocGauge()),
-        const SizedBox(width: 10),
-        Expanded(flex: 25, child: _buildThemeARightPanel()),
+        const SizedBox(width: 8),
+        Expanded(flex: 47, child: _buildThemeACenterSocGauge()),
+        const SizedBox(width: 8),
+        Expanded(flex: 28, child: _buildThemeARightPanel()),
       ],
     );
   }
@@ -973,37 +1050,37 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 const Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text("💰 실시간 유류비 절감", style: TextStyle(color: Colors.white70, fontSize: 15, fontWeight: FontWeight.w500)),
+                    Text("💰 실시간 유류비 절감", style: TextStyle(color: Colors.white70, fontSize: 14, fontWeight: FontWeight.bold)),
                     Text("카니발 대비", style: TextStyle(color: Colors.white38, fontSize: 11)),
                   ],
                 ),
-                const SizedBox(height: 4),
+                const SizedBox(height: 2),
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.baseline,
                   textBaseline: TextBaseline.alphabetic,
                   children: [
-                    Text("+${fuelCosts['saved']}", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 38, fontWeight: FontWeight.bold)),
+                    Text("+${fuelCosts['saved']}", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 36, fontWeight: FontWeight.bold)),
                     const SizedBox(width: 4),
-                    const Text("원 절약", style: TextStyle(color: Colors.white70, fontSize: 16, fontWeight: FontWeight.bold)),
+                    const Text("원 절약", style: TextStyle(color: Colors.white70, fontSize: 15, fontWeight: FontWeight.bold)),
                   ],
                 ),
-                const SizedBox(height: 6),
+                const SizedBox(height: 4),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text("카니발: ${fuelCosts['carnival']}원", style: const TextStyle(color: Colors.white54, fontSize: 12)),
-                    Text("마사다: ${fuelCosts['masada']}원", style: const TextStyle(color: Color(0xFFFFB300), fontSize: 12, fontWeight: FontWeight.bold)),
+                    Text("카니발: ${fuelCosts['carnival']}원", style: const TextStyle(color: Colors.white54, fontSize: 11)),
+                    Text("마사다: ${fuelCosts['masada']}원", style: const TextStyle(color: Color(0xFFFFB300), fontSize: 11, fontWeight: FontWeight.bold)),
                   ],
                 ),
               ],
             ),
           ),
         ),
-        const SizedBox(height: 10),
+        const SizedBox(height: 8),
         Expanded(
           child: Container(
             width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
             decoration: BoxDecoration(
               color: const Color(0xFF13171D),
               borderRadius: BorderRadius.circular(14),
@@ -1013,15 +1090,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                const Text("BMS 주행가능거리 (복합 전비)", style: TextStyle(color: Colors.white70, fontSize: 16, fontWeight: FontWeight.w500)),
-                const SizedBox(height: 4),
+                const Text("BMS 주행가능거리 (복합 전비)", style: TextStyle(color: Colors.white70, fontSize: 14, fontWeight: FontWeight.w500)),
+                const SizedBox(height: 2),
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.baseline,
                   textBaseline: TextBaseline.alphabetic,
                   children: [
-                    Text(_bmsDistance.toStringAsFixed(1), style: TextStyle(color: effThemeColor, fontSize: 46, fontWeight: FontWeight.bold)),
+                    Text(_bmsDistance.toStringAsFixed(1), style: TextStyle(color: effThemeColor, fontSize: 42, fontWeight: FontWeight.bold)),
                     const SizedBox(width: 6),
-                    const Text("km", style: TextStyle(color: Colors.white54, fontSize: 22, fontWeight: FontWeight.bold)),
+                    const Text("km", style: TextStyle(color: Colors.white54, fontSize: 20, fontWeight: FontWeight.bold)),
                   ],
                 ),
               ],
@@ -1039,10 +1116,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
     double acRatio = ((25.0 - _evapTemp) / 25.0).clamp(0.0, 1.0);
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
         color: const Color(0xFF13171D),
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(16),
         border: Border.all(color: const Color(0xFF222A35)),
       ),
       child: Stack(
@@ -1050,22 +1127,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
           Align(
             alignment: Alignment.topCenter,
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
               decoration: BoxDecoration(
                 color: const Color(0xFF1E242C),
-                borderRadius: BorderRadius.circular(8),
+                borderRadius: BorderRadius.circular(6),
                 border: Border.all(color: Colors.white24, width: 0.8),
               ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.thermostat_outlined, color: Colors.orangeAccent, size: 14),
-                  const SizedBox(width: 4),
-                  Text(
-                    "외기온도 ${_envTemp.toStringAsFixed(1)}°C",
-                    style: const TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold),
-                  ),
-                ],
+              child: Text(
+                "외기온도 ${_envTemp.toStringAsFixed(1)}°C",
+                style: const TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.bold),
               ),
             ),
           ),
@@ -1076,39 +1146,27 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    const Text("ACCEL", style: TextStyle(color: Colors.white54, fontSize: 11, fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 2),
-                    Text("$_accelPedalPct%", style: const TextStyle(color: Color(0xFF00E676), fontSize: 13, fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 6),
+                    const Text("ACCEL", style: TextStyle(color: Colors.white54, fontSize: 10, fontWeight: FontWeight.bold)),
+                    Text("$_accelPedalPct%", style: const TextStyle(color: Color(0xFF00E676), fontSize: 12, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 4),
                     Expanded(
                       child: Container(
-                        width: 14,
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF222A35),
-                          borderRadius: BorderRadius.circular(7),
-                        ),
+                        width: 12,
+                        decoration: BoxDecoration(color: const Color(0xFF222A35), borderRadius: BorderRadius.circular(6)),
                         child: LayoutBuilder(
                           builder: (context, constraints) {
                             return Align(
                               alignment: Alignment.bottomCenter,
                               child: Container(
-                                width: 14,
+                                width: 12,
                                 height: constraints.maxHeight * accelRatio,
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFF00E676),
-                                  borderRadius: BorderRadius.circular(7),
-                                  boxShadow: const [
-                                    BoxShadow(color: Color(0xFF00E676), blurRadius: 4, spreadRadius: 1),
-                                  ],
-                                ),
+                                decoration: BoxDecoration(color: const Color(0xFF00E676), borderRadius: BorderRadius.circular(6)),
                               ),
                             );
                           },
                         ),
                       ),
                     ),
-                    const SizedBox(height: 4),
-                    const Text("0%", style: TextStyle(color: Colors.white30, fontSize: 10)),
                   ],
                 ),
               ),
@@ -1119,11 +1177,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     alignment: Alignment.center,
                     children: [
                       SizedBox(
-                        width: 250,
-                        height: 250,
+                        width: 210,
+                        height: 210,
                         child: CircularProgressIndicator(
                           value: (_soc / 100.0).clamp(0.0, 1.0),
-                          strokeWidth: 20,
+                          strokeWidth: 18,
                           backgroundColor: const Color(0xFF222A35),
                           valueColor: AlwaysStoppedAnimation<Color>(effThemeColor),
                         ),
@@ -1131,25 +1189,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const SizedBox(height: 10),
                           Row(
                             mainAxisSize: MainAxisSize.min,
                             crossAxisAlignment: CrossAxisAlignment.baseline,
                             textBaseline: TextBaseline.alphabetic,
                             children: [
-                              Text(_pureDriveTripEfficiency.toStringAsFixed(1), style: TextStyle(color: effThemeColor, fontSize: 26, fontWeight: FontWeight.bold)),
-                              const SizedBox(width: 4),
-                              Text("km/kWh", style: TextStyle(color: effThemeColor.withOpacity(0.85), fontSize: 16, fontWeight: FontWeight.bold)),
+                              Text(_pureDriveTripEfficiency.toStringAsFixed(1), style: TextStyle(color: effThemeColor, fontSize: 24, fontWeight: FontWeight.bold)),
+                              const SizedBox(width: 3),
+                              Text("km/kWh", style: TextStyle(color: effThemeColor.withOpacity(0.85), fontSize: 14, fontWeight: FontWeight.bold)),
                             ],
                           ),
-                          const SizedBox(height: 2),
                           Row(
                             mainAxisSize: MainAxisSize.min,
                             crossAxisAlignment: CrossAxisAlignment.baseline,
                             textBaseline: TextBaseline.alphabetic,
                             children: [
-                              Text(_soc.toStringAsFixed(1), style: TextStyle(color: effThemeColor, fontSize: 58, fontWeight: FontWeight.bold)),
-                              Text("%", style: TextStyle(color: effThemeColor, fontSize: 24, fontWeight: FontWeight.bold)),
+                              Text(_soc.toStringAsFixed(1), style: TextStyle(color: effThemeColor, fontSize: 50, fontWeight: FontWeight.bold)),
+                              Text("%", style: TextStyle(color: effThemeColor, fontSize: 20, fontWeight: FontWeight.bold)),
                             ],
                           ),
                         ],
@@ -1163,48 +1219,29 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    const Text("히터PTC", style: TextStyle(color: Colors.redAccent, fontSize: 10, fontWeight: FontWeight.bold)),
-                    Text("${_ptcTemp.toStringAsFixed(0)}°C", style: const TextStyle(color: Colors.redAccent, fontSize: 12, fontWeight: FontWeight.bold)),
+                    const Text("PTC", style: TextStyle(color: Colors.redAccent, fontSize: 10, fontWeight: FontWeight.bold)),
+                    Text("${_ptcTemp.toStringAsFixed(0)}°", style: const TextStyle(color: Colors.redAccent, fontSize: 11, fontWeight: FontWeight.bold)),
                     const SizedBox(height: 4),
                     Expanded(
                       child: Container(
-                        width: 14,
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF222A35),
-                          borderRadius: BorderRadius.circular(7),
-                        ),
+                        width: 12,
+                        decoration: BoxDecoration(color: const Color(0xFF222A35), borderRadius: BorderRadius.circular(6)),
                         child: LayoutBuilder(
                           builder: (context, constraints) {
                             double halfHeight = constraints.maxHeight / 2.0;
                             return Stack(
                               children: [
-                                Align(
-                                  alignment: Alignment.center,
-                                  child: Container(width: 14, height: 2, color: Colors.white54),
-                                ),
                                 Positioned(
                                   bottom: halfHeight,
                                   left: 0,
                                   right: 0,
-                                  child: Container(
-                                    height: halfHeight * ptcRatio,
-                                    decoration: const BoxDecoration(
-                                      color: Colors.redAccent,
-                                      borderRadius: BorderRadius.vertical(top: Radius.circular(7)),
-                                    ),
-                                  ),
+                                  child: Container(height: halfHeight * ptcRatio, decoration: const BoxDecoration(color: Colors.redAccent, borderRadius: BorderRadius.vertical(top: Radius.circular(6)))),
                                 ),
                                 Positioned(
                                   top: halfHeight,
                                   left: 0,
                                   right: 0,
-                                  child: Container(
-                                    height: halfHeight * acRatio,
-                                    decoration: const BoxDecoration(
-                                      color: Color(0xFF00E5FF),
-                                      borderRadius: BorderRadius.vertical(bottom: Radius.circular(7)),
-                                    ),
-                                  ),
+                                  child: Container(height: halfHeight * acRatio, decoration: const BoxDecoration(color: Color(0xFF00E5FF), borderRadius: BorderRadius.vertical(bottom: Radius.circular(6)))),
                                 ),
                               ],
                             );
@@ -1212,9 +1249,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         ),
                       ),
                     ),
-                    const SizedBox(height: 4),
-                    Text("${_evapTemp.toStringAsFixed(0)}°C", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 12, fontWeight: FontWeight.bold)),
-                    const Text("에어컨", style: TextStyle(color: Color(0xFF00E5FF), fontSize: 10, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 2),
+                    Text("${_evapTemp.toStringAsFixed(0)}°", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 11, fontWeight: FontWeight.bold)),
+                    const Text("A/C", style: TextStyle(color: Color(0xFF00E5FF), fontSize: 9, fontWeight: FontWeight.bold)),
                   ],
                 ),
               ),
@@ -1227,21 +1264,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   Widget _buildThemeARightPanel() {
     Color effThemeColor = _getEfficiencyColor(_efficiencyScore);
-    double regenKw = _current < 0 ? _chargePowerKw : 0.0;
-    double regenPct = (_accumulatedRegenKwh / _batteryTotalKwh) * 100.0;
     double gainedKm = _accumulatedRegenKwh * _pureDriveTripEfficiency;
-
-    double totalConsumed = _driveEnergyKwh + _hvacEnergyKwh;
-    int drivePct = totalConsumed > 0.01 ? ((_driveEnergyKwh / totalConsumed) * 100).round() : 85;
-    int hvacPct = 100 - drivePct;
+    Map<String, int> dist = _calculateEnergyDistribution();
     bool isStopped = _realVehicleSpeedKmh <= 0.5;
 
     return Column(
       children: [
         Expanded(
+          flex: 48,
           child: Container(
             width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             decoration: BoxDecoration(
               color: const Color(0xFF13171D),
               borderRadius: BorderRadius.circular(14),
@@ -1254,7 +1287,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    const Text("🌱 실시간 주행 효율 (1분)", style: TextStyle(color: Colors.white70, fontSize: 15, fontWeight: FontWeight.w500)),
+                    const Text("🌱 1분 효율 점수", style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                       decoration: BoxDecoration(
@@ -1263,31 +1296,27 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         border: Border.all(color: isStopped ? Colors.white30 : effThemeColor, width: 0.8),
                       ),
                       child: Text(
-                        isStopped ? "⏸️ 신호 대기" : (_efficiencyScore >= 80 ? "최고 효율" : (_efficiencyScore >= 50 ? "보통 주행" : "급가속/비효율")),
-                        style: TextStyle(color: isStopped ? Colors.white70 : effThemeColor, fontSize: 12, fontWeight: FontWeight.bold),
+                        isStopped ? "⏸️ 신호 대기" : "$_efficiencyScore점",
+                        style: TextStyle(color: isStopped ? Colors.white70 : effThemeColor, fontSize: 11, fontWeight: FontWeight.bold),
                       ),
                     ),
                   ],
                 ),
                 const SizedBox(height: 4),
                 Row(
-                  crossAxisAlignment: CrossAxisAlignment.baseline,
-                  textBaseline: TextBaseline.alphabetic,
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text("$_efficiencyScore", style: TextStyle(color: effThemeColor, fontSize: 44, fontWeight: FontWeight.bold)),
-                    const SizedBox(width: 5),
-                    const Text("점", style: TextStyle(color: Colors.white54, fontSize: 18, fontWeight: FontWeight.bold)),
-                    const Spacer(),
-                    Text("${_recent1MinEfficiency.toStringAsFixed(1)} km/kWh", style: TextStyle(color: effThemeColor.withOpacity(0.8), fontSize: 16, fontWeight: FontWeight.bold)),
+                    Text("원페달 달성률 $_onePedalScorePct%", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 14, fontWeight: FontWeight.bold)),
+                    Text("+${gainedKm.toStringAsFixed(1)}km 회생", style: const TextStyle(color: Color(0xFF00E676), fontSize: 12, fontWeight: FontWeight.bold)),
                   ],
                 ),
                 const SizedBox(height: 4),
                 ClipRRect(
                   borderRadius: BorderRadius.circular(4),
                   child: LinearProgressIndicator(
-                    value: (_efficiencyScore / 100.0).clamp(0.0, 1.0),
-                    backgroundColor: const Color(0xFF222A35),
-                    valueColor: AlwaysStoppedAnimation<Color>(effThemeColor),
+                    value: (_onePedalScorePct / 100.0).clamp(0.0, 1.0),
+                    backgroundColor: Colors.white10,
+                    valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF00E5FF)),
                     minHeight: 6,
                   ),
                 ),
@@ -1295,48 +1324,51 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ),
           ),
         ),
-        const SizedBox(height: 10),
+        const SizedBox(height: 6),
         Expanded(
+          flex: 52,
           child: Container(
             width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             decoration: BoxDecoration(
               color: const Color(0xFF13171D),
               borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: regenKw > 0.5 ? const Color(0xFFFF9100).withOpacity(0.6) : const Color(0xFF222A35)),
+              border: Border.all(color: const Color(0xFF222A35)),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
+                const Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text("⚡ 에너지 소비처 분석", style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
+                    Text("실시간 누적", style: TextStyle(color: Colors.white38, fontSize: 10)),
+                  ],
+                ),
+                const SizedBox(height: 4),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text("회생 ${regenKw.toStringAsFixed(1)}kW", style: TextStyle(color: regenKw > 0.1 ? const Color(0xFF00E5FF) : Colors.white54, fontSize: 17, fontWeight: FontWeight.bold)),
-                    Text("+${regenPct.toStringAsFixed(1)}%", style: const TextStyle(color: Color(0xFF00E676), fontSize: 17, fontWeight: FontWeight.bold)),
-                    Text("+${gainedKm.toStringAsFixed(1)}km 이득", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 17, fontWeight: FontWeight.bold)),
+                    Text("구동 ${dist['drive']}%", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 11, fontWeight: FontWeight.bold)),
+                    Text("히터 ${dist['ptc']}%", style: const TextStyle(color: Colors.redAccent, fontSize: 11, fontWeight: FontWeight.bold)),
+                    Text("A/C ${dist['ac']}%", style: const TextStyle(color: Colors.cyanAccent, fontSize: 11, fontWeight: FontWeight.bold)),
+                    Text("대기 ${dist['stdby']}%", style: const TextStyle(color: Colors.white54, fontSize: 11)),
                   ],
                 ),
-                const SizedBox(height: 8),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.baseline,
-                  textBaseline: TextBaseline.alphabetic,
-                  children: [
-                    const Text("주행 ", style: TextStyle(color: Colors.white70, fontSize: 16)),
-                    Text("$drivePct%", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 30, fontWeight: FontWeight.bold)),
-                    const SizedBox(width: 12),
-                    const Text("· 공조 ", style: TextStyle(color: Colors.white70, fontSize: 16)),
-                    Text("$hvacPct%", style: const TextStyle(color: Color(0xFFFFB300), fontSize: 30, fontWeight: FontWeight.bold)),
-                  ],
-                ),
-                const SizedBox(height: 6),
+                const SizedBox(height: 5),
                 ClipRRect(
-                  borderRadius: BorderRadius.circular(5),
-                  child: LinearProgressIndicator(
-                    value: drivePct / 100.0,
-                    backgroundColor: const Color(0xFFFFB300),
-                    valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF00E5FF)),
-                    minHeight: 10,
+                  borderRadius: BorderRadius.circular(4),
+                  child: SizedBox(
+                    height: 8,
+                    child: Row(
+                      children: [
+                        Expanded(flex: dist['drive']!, child: Container(color: const Color(0xFF00E5FF))),
+                        Expanded(flex: dist['ptc']!, child: Container(color: Colors.redAccent)),
+                        Expanded(flex: dist['ac']!, child: Container(color: Colors.cyanAccent)),
+                        Expanded(flex: dist['stdby']!, child: Container(color: Colors.white38)),
+                      ],
+                    ),
                   ),
                 ),
               ],
@@ -1376,7 +1408,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         borderRadius: BorderRadius.circular(4),
                         border: Border.all(color: Colors.redAccent, width: 0.8),
                       ),
-                      child: const Text("⚠️ 회생제한 (풋브레이크 권장)", style: TextStyle(color: Colors.redAccent, fontSize: 11, fontWeight: FontWeight.bold)),
+                      child: const Text("⚠️ 회생제한", style: TextStyle(color: Colors.redAccent, fontSize: 11, fontWeight: FontWeight.bold)),
                     ),
                   ],
                 ],
@@ -1397,10 +1429,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
             builder: (context, constraints) {
               double barWidth = constraints.maxWidth;
               double halfWidth = barWidth / 2.0;
-
               double powerMagnitude = _powerKw.abs().clamp(0.0, 50.0);
               double fillWidth = (powerMagnitude / 50.0) * halfWidth;
-
               double limitNormalized = (safeLimitKw / 50.0).clamp(0.0, 1.0);
               double pinLeft = halfWidth + (halfWidth * limitNormalized) - 4.0;
 
@@ -1408,60 +1438,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 clipBehavior: Clip.none,
                 alignment: Alignment.centerLeft,
                 children: [
-                  Container(
-                    width: barWidth,
-                    height: 12,
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF222A35),
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                  ),
+                  Container(width: barWidth, height: 12, decoration: BoxDecoration(color: const Color(0xFF222A35), borderRadius: BorderRadius.circular(6))),
                   if (_powerKw < -0.1)
-                    Positioned(
-                      right: halfWidth,
-                      child: Container(
-                        width: fillWidth,
-                        height: 12,
-                        decoration: const BoxDecoration(
-                          color: Color(0xFF00E5FF),
-                          borderRadius: BorderRadius.horizontal(left: Radius.circular(6)),
-                        ),
-                      ),
-                    )
+                    Positioned(right: halfWidth, child: Container(width: fillWidth, height: 12, decoration: const BoxDecoration(color: Color(0xFF00E5FF), borderRadius: BorderRadius.horizontal(left: Radius.circular(6)))))
                   else if (_powerKw > 0.1)
-                    Positioned(
-                      left: halfWidth,
-                      child: Container(
-                        width: fillWidth,
-                        height: 12,
-                        decoration: BoxDecoration(
-                          color: dynamicBarColor,
-                          borderRadius: const BorderRadius.horizontal(right: Radius.circular(6)),
-                        ),
-                      ),
-                    ),
-                  Positioned(
-                    left: halfWidth - 1.0,
-                    child: Container(
-                      width: 2.0,
-                      height: 16,
-                      color: Colors.white70,
-                    ),
-                  ),
-                  Positioned(
-                    left: pinLeft.clamp(halfWidth, barWidth - 8.0),
-                    child: Container(
-                      width: 8,
-                      height: 18,
-                      decoration: BoxDecoration(
-                        color: Colors.redAccent,
-                        borderRadius: BorderRadius.circular(2.0),
-                        boxShadow: const [
-                          BoxShadow(color: Colors.black87, blurRadius: 3, offset: Offset(0, 1)),
-                        ],
-                      ),
-                    ),
-                  ),
+                    Positioned(left: halfWidth, child: Container(width: fillWidth, height: 12, decoration: BoxDecoration(color: dynamicBarColor, borderRadius: BorderRadius.horizontal(right: Radius.circular(6))))),
+                  Positioned(left: halfWidth - 1.0, child: Container(width: 2.0, height: 16, color: Colors.white70)),
+                  Positioned(left: pinLeft.clamp(halfWidth, barWidth - 8.0), child: Container(width: 8, height: 18, decoration: BoxDecoration(color: Colors.redAccent, borderRadius: BorderRadius.circular(2.0), boxShadow: const [BoxShadow(color: Colors.black87, blurRadius: 3, offset: Offset(0, 1))]))),
                 ],
               );
             },
@@ -1477,13 +1460,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Widget _buildThemeBDriverDashboard() {
     return Row(
       children: [
-        // 1. 좌측: 대형 수직 파워 & 회생제동 미터기 (22% 너비)
         Expanded(flex: 22, child: _buildVerticalPowerMeter()),
         const SizedBox(width: 8),
-        // 2. 중앙: 초대형 배터리 링 & 주행거리 & 공조/악셀 (48% 너비)
         Expanded(flex: 48, child: _buildLargeCenterGaugeHub()),
         const SizedBox(width: 8),
-        // 3. 우측: 대형 유류비 & 주행 효율 카드 (30% 너비)
         Expanded(flex: 30, child: _buildRightExpandedPanel()),
       ],
     );
@@ -1494,120 +1474,38 @@ class _DashboardScreenState extends State<DashboardScreen> {
     Color dynamicPowerColor = _getPowerGaugeColor(_powerKw, _batteryTemp);
     bool isRegen = _powerKw < -0.1;
     bool isPower = _powerKw > 0.1;
-
-    double powerMagnitude = _powerKw.abs().clamp(0.0, 50.0);
-    double fillRatio = powerMagnitude / 50.0;
+    double fillRatio = _powerKw.abs().clamp(0.0, 50.0) / 50.0;
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(
-        color: const Color(0xFF13171D),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFF222A35)),
-      ),
+      decoration: BoxDecoration(color: const Color(0xFF13171D), borderRadius: BorderRadius.circular(16), border: Border.all(color: const Color(0xFF222A35))),
       child: Column(
         children: [
-          const Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.bolt, color: Colors.redAccent, size: 16),
-              SizedBox(width: 2),
-              Text("POWER", style: TextStyle(color: Colors.redAccent, fontSize: 13, fontWeight: FontWeight.w900)),
-            ],
-          ),
+          const Row(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(Icons.bolt, color: Colors.redAccent, size: 16), SizedBox(width: 2), Text("POWER", style: TextStyle(color: Colors.redAccent, fontSize: 13, fontWeight: FontWeight.w900))]),
           const SizedBox(height: 2),
-          Text(
-            isPower ? "+${_powerKw.toStringAsFixed(1)} kW" : (isRegen ? "${_powerKw.toStringAsFixed(1)} kW" : "0.0 kW"),
-            style: TextStyle(
-              color: isRegen ? const Color(0xFF00E5FF) : (isPower ? dynamicPowerColor : Colors.white70),
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
+          Text(isPower ? "+${_powerKw.toStringAsFixed(1)} kW" : (isRegen ? "${_powerKw.toStringAsFixed(1)} kW" : "0.0 kW"), style: TextStyle(color: isRegen ? const Color(0xFF00E5FF) : (isPower ? dynamicPowerColor : Colors.white70), fontSize: 18, fontWeight: FontWeight.bold)),
           const SizedBox(height: 6),
           Expanded(
             child: LayoutBuilder(
               builder: (context, constraints) {
-                double totalHeight = constraints.maxHeight;
-                double halfHeight = totalHeight / 2.0;
+                double halfHeight = constraints.maxHeight / 2.0;
                 double limitTopPin = halfHeight - (halfHeight * (safeLimitKw / 50.0).clamp(0.0, 1.0));
-
                 return Stack(
                   alignment: Alignment.center,
                   clipBehavior: Clip.none,
                   children: [
-                    Container(
-                      width: 28,
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF1E242C),
-                        borderRadius: BorderRadius.circular(14),
-                        border: Border.all(color: Colors.white12),
-                      ),
-                    ),
-                    if (isPower)
-                      Positioned(
-                        bottom: halfHeight,
-                        child: Container(
-                          width: 28,
-                          height: halfHeight * fillRatio,
-                          decoration: BoxDecoration(
-                            color: dynamicPowerColor,
-                            borderRadius: const BorderRadius.vertical(top: Radius.circular(14)),
-                            boxShadow: [
-                              BoxShadow(color: dynamicPowerColor.withOpacity(0.5), blurRadius: 6, spreadRadius: 1),
-                            ],
-                          ),
-                        ),
-                      ),
-                    if (isRegen)
-                      Positioned(
-                        top: halfHeight,
-                        child: Container(
-                          width: 28,
-                          height: halfHeight * fillRatio,
-                          decoration: const BoxDecoration(
-                            color: Color(0xFF00E5FF),
-                            borderRadius: BorderRadius.vertical(bottom: Radius.circular(14)),
-                            boxShadow: [
-                              BoxShadow(color: Color(0xFF00E5FF), blurRadius: 6, spreadRadius: 1),
-                            ],
-                          ),
-                        ),
-                      ),
-                    Positioned(
-                      top: halfHeight - 1,
-                      child: Container(
-                        width: 38,
-                        height: 2,
-                        color: Colors.white,
-                      ),
-                    ),
-                    Positioned(
-                      top: limitTopPin - 2,
-                      left: -2,
-                      child: Container(
-                        width: 32,
-                        height: 4,
-                        decoration: BoxDecoration(
-                          color: Colors.redAccent,
-                          borderRadius: BorderRadius.circular(2),
-                        ),
-                      ),
-                    ),
+                    Container(width: 28, decoration: BoxDecoration(color: const Color(0xFF1E242C), borderRadius: BorderRadius.circular(14), border: Border.all(color: Colors.white12))),
+                    if (isPower) Positioned(bottom: halfHeight, child: Container(width: 28, height: halfHeight * fillRatio, decoration: BoxDecoration(color: dynamicPowerColor, borderRadius: const BorderRadius.vertical(top: Radius.circular(14))))),
+                    if (isRegen) Positioned(top: halfHeight, child: Container(width: 28, height: halfHeight * fillRatio, decoration: const BoxDecoration(color: Color(0xFF00E5FF), borderRadius: BorderRadius.vertical(bottom: Radius.circular(14))))),
+                    Positioned(top: halfHeight - 1, child: Container(width: 38, height: 2, color: Colors.white)),
+                    Positioned(top: limitTopPin - 2, left: -2, child: Container(width: 32, height: 4, decoration: BoxDecoration(color: Colors.redAccent, borderRadius: BorderRadius.circular(2)))),
                   ],
                 );
               },
             ),
           ),
           const SizedBox(height: 6),
-          const Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.recycling, color: Color(0xFF00E5FF), size: 16),
-              SizedBox(width: 2),
-              Text("REGEN", style: TextStyle(color: Color(0xFF00E5FF), fontSize: 13, fontWeight: FontWeight.w900)),
-            ],
-          ),
+          const Row(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(Icons.recycling, color: Color(0xFF00E5FF), size: 16), SizedBox(width: 2), Text("REGEN", style: TextStyle(color: Color(0xFF00E5FF), fontSize: 13, fontWeight: FontWeight.w900))]),
         ],
       ),
     );
@@ -1621,33 +1519,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(
-        color: const Color(0xFF13171D),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFF222A35)),
-      ),
+      decoration: BoxDecoration(color: const Color(0xFF13171D), borderRadius: BorderRadius.circular(16), border: Border.all(color: const Color(0xFF222A35))),
       child: Stack(
         children: [
           Align(
             alignment: Alignment.topCenter,
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
-              decoration: BoxDecoration(
-                color: const Color(0xFF1E242C),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.white24, width: 0.8),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.thermostat_outlined, color: Colors.orangeAccent, size: 14),
-                  const SizedBox(width: 4),
-                  Text(
-                    "외기 ${_envTemp.toStringAsFixed(1)}°C",
-                    style: const TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold),
-                  ),
-                ],
-              ),
+              decoration: BoxDecoration(color: const Color(0xFF1E242C), borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.white24, width: 0.8)),
+              child: Text("외기 ${_envTemp.toStringAsFixed(1)}°C", style: const TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
             ),
           ),
           Row(
@@ -1663,28 +1543,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     Expanded(
                       child: Container(
                         width: 14,
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF1E242C),
-                          borderRadius: BorderRadius.circular(7),
-                        ),
-                        child: LayoutBuilder(
-                          builder: (context, constraints) {
-                            return Align(
-                              alignment: Alignment.bottomCenter,
-                              child: Container(
-                                width: 14,
-                                height: constraints.maxHeight * accelRatio,
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFF00E676),
-                                  borderRadius: BorderRadius.circular(7),
-                                  boxShadow: const [
-                                    BoxShadow(color: Color(0xFF00E676), blurRadius: 4, spreadRadius: 1),
-                                  ],
-                                ),
-                              ),
-                            );
-                          },
-                        ),
+                        decoration: BoxDecoration(color: const Color(0xFF1E242C), borderRadius: BorderRadius.circular(7)),
+                        child: LayoutBuilder(builder: (c, constraints) => Align(alignment: Alignment.bottomCenter, child: Container(width: 14, height: constraints.maxHeight * accelRatio, decoration: BoxDecoration(color: const Color(0xFF00E676), borderRadius: BorderRadius.circular(7))))),
                       ),
                     ),
                     const SizedBox(height: 2),
@@ -1698,55 +1558,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   child: Stack(
                     alignment: Alignment.center,
                     children: [
-                      SizedBox(
-                        width: 230,
-                        height: 230,
-                        child: CircularProgressIndicator(
-                          value: (_soc / 100.0).clamp(0.0, 1.0),
-                          strokeWidth: 22,
-                          backgroundColor: const Color(0xFF1E242C),
-                          valueColor: AlwaysStoppedAnimation<Color>(effThemeColor),
-                        ),
-                      ),
+                      SizedBox(width: 230, height: 230, child: CircularProgressIndicator(value: (_soc / 100.0).clamp(0.0, 1.0), strokeWidth: 22, backgroundColor: const Color(0xFF1E242C), valueColor: AlwaysStoppedAnimation<Color>(effThemeColor))),
                       Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Row(
-                            mainAxisSize: MainAxisSize.min,
-                            crossAxisAlignment: CrossAxisAlignment.baseline,
-                            textBaseline: TextBaseline.alphabetic,
-                            children: [
-                              Text(
-                                _bmsDistance.toStringAsFixed(0),
-                                style: const TextStyle(color: Colors.white, fontSize: 44, fontWeight: FontWeight.w900),
-                              ),
-                              const SizedBox(width: 3),
-                              const Text("km", style: TextStyle(color: Colors.white70, fontSize: 18, fontWeight: FontWeight.bold)),
-                            ],
-                          ),
-                          Row(
-                            mainAxisSize: MainAxisSize.min,
-                            crossAxisAlignment: CrossAxisAlignment.baseline,
-                            textBaseline: TextBaseline.alphabetic,
-                            children: [
-                              Text(
-                                _soc.toStringAsFixed(1),
-                                style: TextStyle(color: effThemeColor, fontSize: 52, fontWeight: FontWeight.w900),
-                              ),
-                              Text("%", style: TextStyle(color: effThemeColor, fontSize: 24, fontWeight: FontWeight.bold)),
-                            ],
-                          ),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: effThemeColor.withOpacity(0.15),
-                              borderRadius: BorderRadius.circular(6),
-                            ),
-                            child: Text(
-                              "${_pureDriveTripEfficiency.toStringAsFixed(1)} km/kWh",
-                              style: TextStyle(color: effThemeColor, fontSize: 14, fontWeight: FontWeight.bold),
-                            ),
-                          ),
+                          Row(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.baseline, textBaseline: TextBaseline.alphabetic, children: [Text(_bmsDistance.toStringAsFixed(0), style: const TextStyle(color: Colors.white, fontSize: 44, fontWeight: FontWeight.w900)), const SizedBox(width: 3), const Text("km", style: TextStyle(color: Colors.white70, fontSize: 18, fontWeight: FontWeight.bold))]),
+                          Row(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.baseline, textBaseline: TextBaseline.alphabetic, children: [Text(_soc.toStringAsFixed(1), style: TextStyle(color: effThemeColor, fontSize: 52, fontWeight: FontWeight.w900)), Text("%", style: TextStyle(color: effThemeColor, fontSize: 24, fontWeight: FontWeight.bold))]),
+                          Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2), decoration: BoxDecoration(color: effThemeColor.withOpacity(0.15), borderRadius: BorderRadius.circular(6)), child: Text("${_pureDriveTripEfficiency.toStringAsFixed(1)} km/kWh", style: TextStyle(color: effThemeColor, fontSize: 14, fontWeight: FontWeight.bold))),
                         ],
                       ),
                     ],
@@ -1764,45 +1582,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     Expanded(
                       child: Container(
                         width: 14,
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF1E242C),
-                          borderRadius: BorderRadius.circular(7),
-                        ),
+                        decoration: BoxDecoration(color: const Color(0xFF1E242C), borderRadius: BorderRadius.circular(7)),
                         child: LayoutBuilder(
-                          builder: (context, constraints) {
-                            double halfHeight = constraints.maxHeight / 2.0;
-                            return Stack(
-                              children: [
-                                Align(
-                                  alignment: Alignment.center,
-                                  child: Container(width: 14, height: 2, color: Colors.white54),
-                                ),
-                                Positioned(
-                                  bottom: halfHeight,
-                                  left: 0,
-                                  right: 0,
-                                  child: Container(
-                                    height: halfHeight * ptcRatio,
-                                    decoration: const BoxDecoration(
-                                      color: Colors.redAccent,
-                                      borderRadius: BorderRadius.vertical(top: Radius.circular(7)),
-                                    ),
-                                  ),
-                                ),
-                                Positioned(
-                                  top: halfHeight,
-                                  left: 0,
-                                  right: 0,
-                                  child: Container(
-                                    height: halfHeight * acRatio,
-                                    decoration: const BoxDecoration(
-                                      color: Color(0xFF00E5FF),
-                                      borderRadius: BorderRadius.vertical(bottom: Radius.circular(7)),
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            );
+                          builder: (c, constraints) {
+                            double half = constraints.maxHeight / 2.0;
+                            return Stack(children: [
+                              Align(alignment: Alignment.center, child: Container(width: 14, height: 2, color: Colors.white54)),
+                              Positioned(bottom: half, left: 0, right: 0, child: Container(height: half * ptcRatio, decoration: const BoxDecoration(color: Colors.redAccent, borderRadius: BorderRadius.vertical(top: Radius.circular(7))))),
+                              Positioned(top: half, left: 0, right: 0, child: Container(height: half * acRatio, decoration: const BoxDecoration(color: Color(0xFF00E5FF), borderRadius: BorderRadius.vertical(bottom: Radius.circular(7))))),
+                            ]);
                           },
                         ),
                       ),
@@ -1821,14 +1609,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Widget _buildRightExpandedPanel() {
-    Color effThemeColor = _getEfficiencyColor(_efficiencyScore);
     Map<String, int> fuelCosts = _calculateDetailedFuelCosts();
-    double regenPct = (_accumulatedRegenKwh / _batteryTotalKwh) * 100.0;
-    double gainedKm = _accumulatedRegenKwh * _pureDriveTripEfficiency;
-
-    double totalConsumed = _driveEnergyKwh + _hvacEnergyKwh;
-    int drivePct = totalConsumed > 0.01 ? ((_driveEnergyKwh / totalConsumed) * 100).round() : 85;
-    int hvacPct = 100 - drivePct;
+    Map<String, int> dist = _calculateEnergyDistribution();
+    Color effThemeColor = _getEfficiencyColor(_efficiencyScore);
     bool isStopped = _realVehicleSpeedKmh <= 0.5;
 
     return Column(
@@ -1838,40 +1621,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
           child: Container(
             width: double.infinity,
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(
-              color: const Color(0xFF13171D),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: const Color(0xFF222A35)),
-            ),
+            decoration: BoxDecoration(color: const Color(0xFF13171D), borderRadius: BorderRadius.circular(16), border: Border.all(color: const Color(0xFF222A35))),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                const Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text("💰 실시간 유류비 절감", style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
-                    Text("카니발 대비", style: TextStyle(color: Colors.white38, fontSize: 11)),
-                  ],
-                ),
+                const Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text("💰 실시간 유류비 절감", style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)), Text("카니발 대비", style: TextStyle(color: Colors.white38, fontSize: 11))]),
                 const SizedBox(height: 2),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.baseline,
-                  textBaseline: TextBaseline.alphabetic,
-                  children: [
-                    Text("+${fuelCosts['saved']}", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 36, fontWeight: FontWeight.w900)),
-                    const SizedBox(width: 4),
-                    const Text("원", style: TextStyle(color: Colors.white70, fontSize: 18, fontWeight: FontWeight.bold)),
-                  ],
-                ),
+                Row(crossAxisAlignment: CrossAxisAlignment.baseline, textBaseline: TextBaseline.alphabetic, children: [Text("+${fuelCosts['saved']}", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 36, fontWeight: FontWeight.w900)), const SizedBox(width: 4), const Text("원", style: TextStyle(color: Colors.white70, fontSize: 18, fontWeight: FontWeight.bold))]),
                 const SizedBox(height: 4),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text("카니발: ${fuelCosts['carnival']}원", style: const TextStyle(color: Colors.white54, fontSize: 11)),
-                    Text("마사다: ${fuelCosts['masada']}원", style: const TextStyle(color: Color(0xFFFFB300), fontSize: 11, fontWeight: FontWeight.bold)),
-                  ],
-                ),
+                Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text("카니발: ${fuelCosts['carnival']}원", style: const TextStyle(color: Colors.white54, fontSize: 11)), Text("마사다: ${fuelCosts['masada']}원", style: const TextStyle(color: Color(0xFFFFB300), fontSize: 11, fontWeight: FontWeight.bold))]),
               ],
             ),
           ),
@@ -1882,56 +1641,180 @@ class _DashboardScreenState extends State<DashboardScreen> {
           child: Container(
             width: double.infinity,
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(
-              color: const Color(0xFF13171D),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: const Color(0xFF222A35)),
-            ),
+            decoration: BoxDecoration(color: const Color(0xFF13171D), borderRadius: BorderRadius.circular(16), border: Border.all(color: const Color(0xFF222A35))),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    const Text("🌱 1분 효율 점수", style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: isStopped ? Colors.white10 : effThemeColor.withOpacity(0.2),
-                        borderRadius: BorderRadius.circular(5),
-                        border: Border.all(color: isStopped ? Colors.white30 : effThemeColor, width: 0.8),
-                      ),
-                      child: Text(
-                        isStopped ? "⏸️ 신호 대기" : "$_efficiencyScore점",
-                        style: TextStyle(color: isStopped ? Colors.white70 : effThemeColor, fontSize: 11, fontWeight: FontWeight.bold),
-                      ),
-                    ),
-                  ],
-                ),
+                Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text("🌱 원페달 $_onePedalScorePct%", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 13, fontWeight: FontWeight.bold)), Container(padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2), decoration: BoxDecoration(color: isStopped ? Colors.white10 : effThemeColor.withOpacity(0.2), borderRadius: BorderRadius.circular(5)), child: Text(isStopped ? "⏸️ 대기" : "$_efficiencyScore점", style: TextStyle(color: isStopped ? Colors.white70 : effThemeColor, fontSize: 11, fontWeight: FontWeight.bold)))]),
                 const SizedBox(height: 6),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text("회생 +${regenPct.toStringAsFixed(1)}% (+${gainedKm.toStringAsFixed(1)}km)", style: const TextStyle(color: Color(0xFF00E676), fontSize: 12, fontWeight: FontWeight.bold)),
-                    Text("주행$drivePct%·공조$hvacPct%", style: const TextStyle(color: Colors.white70, fontSize: 11)),
-                  ],
-                ),
+                Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text("구동 ${dist['drive']}%", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 11, fontWeight: FontWeight.bold)), Text("히터 ${dist['ptc']}%", style: const TextStyle(color: Colors.redAccent, fontSize: 11, fontWeight: FontWeight.bold)), Text("A/C ${dist['ac']}%", style: const TextStyle(color: Colors.cyanAccent, fontSize: 11, fontWeight: FontWeight.bold)), Text("대기 ${dist['stdby']}%", style: const TextStyle(color: Colors.white54, fontSize: 11))]),
                 const SizedBox(height: 4),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(4),
-                  child: LinearProgressIndicator(
-                    value: drivePct / 100.0,
-                    backgroundColor: const Color(0xFFFFB300),
-                    valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF00E5FF)),
-                    minHeight: 8,
-                  ),
-                ),
+                ClipRRect(borderRadius: BorderRadius.circular(4), child: SizedBox(height: 8, child: Row(children: [Expanded(flex: dist['drive']!, child: Container(color: const Color(0xFF00E5FF))), Expanded(flex: dist['ptc']!, child: Container(color: Colors.redAccent)), Expanded(flex: dist['ac']!, child: Container(color: Colors.cyanAccent)), Expanded(flex: dist['stdby']!, child: Container(color: Colors.white38))]))),
               ],
             ),
           ),
         ),
       ],
+    );
+  }
+
+  // =========================================================================
+  // [테마 C: 나이트 드라이브 다크 모드]
+  // =========================================================================
+  Widget _buildThemeCNightDashboard() {
+    return Container(
+      decoration: BoxDecoration(color: Colors.black, borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.amber.withOpacity(0.3), width: 1.2)),
+      padding: const EdgeInsets.all(16),
+      child: Row(
+        children: [
+          Expanded(
+            flex: 35,
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Text("NIGHT DRIVE MODE", style: TextStyle(color: Colors.amber, fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 2.0)),
+                const SizedBox(height: 10),
+                Text("${_soc.toStringAsFixed(1)}%", style: const TextStyle(color: Colors.amber, fontSize: 72, fontWeight: FontWeight.w900)),
+                const SizedBox(height: 10),
+                Text("BMS 주행거리: ${_bmsDistance.toStringAsFixed(0)} km", style: const TextStyle(color: Colors.white70, fontSize: 16, fontWeight: FontWeight.bold)),
+              ],
+            ),
+          ),
+          const VerticalDivider(color: Colors.white24, width: 32),
+          Expanded(
+            flex: 65,
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceAround,
+                  children: [
+                    _buildNightMetric("실시간 파워", "${_powerKw.toStringAsFixed(1)} kW", Colors.amberAccent),
+                    _buildNightMetric("배터리 온도", "${_batteryTemp.toStringAsFixed(1)}°C", Colors.orange),
+                    _buildNightMetric("원페달 점수", "$_onePedalScorePct점", Colors.greenAccent),
+                  ],
+                ),
+                const SizedBox(height: 24),
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(color: const Color(0xFF111111), borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.amber.withOpacity(0.2))),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceAround,
+                    children: [
+                      Text("외기: ${_envTemp.toStringAsFixed(1)}°C", style: const TextStyle(color: Colors.white70, fontSize: 15)),
+                      Text("히터PTC: ${_ptcTemp.toStringAsFixed(0)}°C", style: const TextStyle(color: Colors.redAccent, fontSize: 15)),
+                      Text("에어컨: ${_evapTemp.toStringAsFixed(0)}°C", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 15)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNightMetric(String title, String value, Color color) {
+    return Column(
+      children: [
+        Text(title, style: const TextStyle(color: Colors.white54, fontSize: 13)),
+        const SizedBox(height: 4),
+        Text(value, style: TextStyle(color: color, fontSize: 24, fontWeight: FontWeight.bold)),
+      ],
+    );
+  }
+
+  // =========================================================================
+  // [테마 D: 에코 챌린지 마스터 모드]
+  // =========================================================================
+  Widget _buildThemeDEcoDashboard() {
+    double gainedKm = _accumulatedRegenKwh * _pureDriveTripEfficiency;
+    Map<String, int> dist = _calculateEnergyDistribution();
+
+    return Container(
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(colors: [Color(0xFF0A1F13), Color(0xFF0D1117)], begin: Alignment.topLeft, end: Alignment.bottomRight),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFF00E676).withOpacity(0.5), width: 1.5),
+      ),
+      padding: const EdgeInsets.all(16),
+      child: Row(
+        children: [
+          Expanded(
+            flex: 40,
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Row(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(Icons.eco, color: Color(0xFF00E676), size: 22), SizedBox(width: 6), Text("ECO CHALLENGE", style: TextStyle(color: Color(0xFF00E676), fontSize: 15, fontWeight: FontWeight.bold))]),
+                const SizedBox(height: 12),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  textBaseline: TextBaseline.alphabetic,
+                  children: [
+                    Text(_pureDriveTripEfficiency.toStringAsFixed(1), style: const TextStyle(color: Color(0xFF00E676), fontSize: 62, fontWeight: FontWeight.w900)),
+                    const SizedBox(width: 4),
+                    const Text("km/kWh", style: TextStyle(color: Colors.white70, fontSize: 18, fontWeight: FontWeight.bold)),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Text("회생 제동으로 +${gainedKm.toStringAsFixed(1)}km 추가 확보!", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 13, fontWeight: FontWeight.bold)),
+              ],
+            ),
+          ),
+          const VerticalDivider(color: Colors.white24, width: 32),
+          Expanded(
+            flex: 60,
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text("원페달 드라이빙 마스터리", style: TextStyle(color: Colors.white70, fontSize: 14, fontWeight: FontWeight.bold)),
+                    Text("$_onePedalScorePct%", style: const TextStyle(color: Color(0xFF00E676), fontSize: 20, fontWeight: FontWeight.bold)),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(6),
+                  child: LinearProgressIndicator(
+                    value: (_onePedalScorePct / 100.0).clamp(0.0, 1.0),
+                    backgroundColor: Colors.white10,
+                    valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF00E676)),
+                    minHeight: 12,
+                  ),
+                ),
+                const SizedBox(height: 20),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceAround,
+                  children: [
+                    _buildEcoCard("모터 구동", "${dist['drive']}%", const Color(0xFF00E5FF)),
+                    _buildEcoCard("공조(냉/난방)", "${dist['ptc']! + dist['ac']!}%", Colors.orangeAccent),
+                    _buildEcoCard("배터리 잔량", "${_soc.toStringAsFixed(0)}%", const Color(0xFF00E676)),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEcoCard(String title, String value, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: BoxDecoration(color: const Color(0xFF16221B), borderRadius: BorderRadius.circular(10), border: Border.all(color: color.withOpacity(0.4))),
+      child: Column(
+        children: [
+          Text(title, style: const TextStyle(color: Colors.white54, fontSize: 11)),
+          const SizedBox(height: 3),
+          Text(value, style: TextStyle(color: color, fontSize: 18, fontWeight: FontWeight.bold)),
+        ],
+      ),
     );
   }
 
@@ -1956,52 +1839,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
           flex: 42,
           child: Container(
             padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: const Color(0xFF13171D),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: const Color(0xFFFFB300).withOpacity(0.4)),
-            ),
+            decoration: BoxDecoration(color: const Color(0xFF13171D), borderRadius: BorderRadius.circular(16), border: Border.all(color: const Color(0xFFFFB300).withOpacity(0.4))),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 const Text("현재 배터리 잔량", style: TextStyle(color: Colors.white54, fontSize: 13)),
-                Text(
-                  "${_soc.toStringAsFixed(1)} %",
-                  style: const TextStyle(color: Color(0xFF00E676), fontSize: 44, fontWeight: FontWeight.bold),
-                ),
+                Text("${_soc.toStringAsFixed(1)} %", style: const TextStyle(color: Color(0xFF00E676), fontSize: 44, fontWeight: FontWeight.bold)),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceAround,
                   children: [
-                    Column(
-                      children: [
-                        Text(isCharging ? "실시간 충전 전력" : "실시간 소모 전력", style: const TextStyle(color: Colors.white54, fontSize: 12)),
-                        const SizedBox(height: 2),
-                        Text(
-                          isCharging ? "${_chargePowerKw.toStringAsFixed(1)} kW" : "${liveWatts.toStringAsFixed(0)} W",
-                          style: const TextStyle(color: Color(0xFFFFB300), fontSize: 18, fontWeight: FontWeight.bold),
-                        ),
-                      ],
-                    ),
-                    Column(
-                      children: [
-                        Text(isCharging ? "시간당 충전율" : "시간당 소모율", style: const TextStyle(color: Colors.white54, fontSize: 12)),
-                        const SizedBox(height: 2),
-                        Text(
-                          "${percentPerHour.toStringAsFixed(1)} %/h",
-                          style: const TextStyle(color: Colors.cyanAccent, fontSize: 18, fontWeight: FontWeight.bold),
-                        ),
-                      ],
-                    ),
+                    Column(children: [Text(isCharging ? "실시간 충전 전력" : "실시간 소모 전력", style: const TextStyle(color: Colors.white54, fontSize: 12)), const SizedBox(height: 2), Text(isCharging ? "${_chargePowerKw.toStringAsFixed(1)} kW" : "${liveWatts.toStringAsFixed(0)} W", style: const TextStyle(color: Color(0xFFFFB300), fontSize: 18, fontWeight: FontWeight.bold))]),
+                    Column(children: [Text(isCharging ? "시간당 충전율" : "시간당 소모율", style: const TextStyle(color: Colors.white54, fontSize: 12)), const SizedBox(height: 2), Text("${percentPerHour.toStringAsFixed(1)} %/h", style: const TextStyle(color: Colors.cyanAccent, fontSize: 18, fontWeight: FontWeight.bold))]),
                   ],
                 ),
                 const Divider(color: Colors.white12, height: 10),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF1A212B),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: Colors.white12),
-                  ),
+                  decoration: BoxDecoration(color: const Color(0xFF1A212B), borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.white12)),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceAround,
                     children: [
@@ -2026,11 +1880,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 child: Container(
                   width: double.infinity,
                   padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF13171D),
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(color: const Color(0xFF222A35)),
-                  ),
+                  decoration: BoxDecoration(color: const Color(0xFF13171D), borderRadius: BorderRadius.circular(14), border: Border.all(color: const Color(0xFF222A35))),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisAlignment: MainAxisAlignment.center,
@@ -2039,45 +1889,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       const SizedBox(height: 6),
                       Row(
                         children: [
-                          Expanded(
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF1E242C),
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.3)),
-                              ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  const Text("🛡️ 복귀 마진 (20% 도달)", style: TextStyle(color: Colors.white54, fontSize: 11)),
-                                  const SizedBox(height: 2),
-                                  Text(margin20Time, style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 20, fontWeight: FontWeight.bold)),
-                                  Text("가용량: $avail20Kwh kWh", style: const TextStyle(color: Colors.white38, fontSize: 10)),
-                                ],
-                              ),
-                            ),
-                          ),
+                          Expanded(child: Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6), decoration: BoxDecoration(color: const Color(0xFF1E242C), borderRadius: BorderRadius.circular(10), border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.3))), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text("🛡️ 복귀 마진 (20% 도달)", style: TextStyle(color: Colors.white54, fontSize: 11)), const SizedBox(height: 2), Text(margin20Time, style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 20, fontWeight: FontWeight.bold)), Text("가용량: $avail20Kwh kWh", style: const TextStyle(color: Colors.white38, fontSize: 10))]))),
                           const SizedBox(width: 8),
-                          Expanded(
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF1E242C),
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(color: const Color(0xFFFF5252).withOpacity(0.3)),
-                              ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  const Text("⚠️ 한계 마진 (0% 방전)", style: TextStyle(color: Colors.white54, fontSize: 11)),
-                                  const SizedBox(height: 2),
-                                  Text(margin0Time, style: const TextStyle(color: Color(0xFFFF5252), fontSize: 20, fontWeight: FontWeight.bold)),
-                                  Text("잔여량: $avail0Kwh kWh", style: const TextStyle(color: Colors.white38, fontSize: 10)),
-                                ],
-                              ),
-                            ),
-                          ),
+                          Expanded(child: Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6), decoration: BoxDecoration(color: const Color(0xFF1E242C), borderRadius: BorderRadius.circular(10), border: Border.all(color: const Color(0xFFFF5252).withOpacity(0.3))), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text("⚠️ 한계 마진 (0% 방전)", style: TextStyle(color: Colors.white54, fontSize: 11)), const SizedBox(height: 2), Text(margin0Time, style: const TextStyle(color: Color(0xFFFF5252), fontSize: 20, fontWeight: FontWeight.bold)), Text("잔여량: $avail0Kwh kWh", style: const TextStyle(color: Colors.white38, fontSize: 10))]))),
                         ],
                       ),
                     ],
@@ -2089,68 +1903,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 child: Container(
                   width: double.infinity,
                   padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF13171D),
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(color: isCharging ? const Color(0xFF00E5FF).withOpacity(0.5) : const Color(0xFF222A35)),
-                  ),
+                  decoration: BoxDecoration(color: const Color(0xFF13171D), borderRadius: BorderRadius.circular(14), border: Border.all(color: isCharging ? const Color(0xFF00E5FF).withOpacity(0.5) : const Color(0xFF222A35))),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            isCharging ? (isFastCharge ? "⚡ 급속 충전 진행 중" : "🔌 완속 충전 진행 중") : "⚡ 실시간 충전 대기",
-                            style: TextStyle(color: isCharging ? const Color(0xFFFFB300) : Colors.white70, fontSize: 13, fontWeight: FontWeight.bold),
-                          ),
-                          Text(
-                            "${_chargePowerKw.toStringAsFixed(1)} kW",
-                            style: TextStyle(color: isCharging ? const Color(0xFFFFB300) : Colors.white54, fontSize: 18, fontWeight: FontWeight.bold),
-                          ),
-                        ],
-                      ),
+                      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text(isCharging ? (isFastCharge ? "⚡ 급속 충전 진행 중" : "🔌 완속 충전 진행 중") : "⚡ 실시간 충전 대기", style: TextStyle(color: isCharging ? const Color(0xFFFFB300) : Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)), Text("${_chargePowerKw.toStringAsFixed(1)} kW", style: TextStyle(color: isCharging ? const Color(0xFFFFB300) : Colors.white54, fontSize: 18, fontWeight: FontWeight.bold))]),
                       const SizedBox(height: 6),
                       Row(
                         children: [
-                          Expanded(
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF1E242C),
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.3)),
-                              ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  const Text("80% 목표 도달", style: TextStyle(color: Colors.white54, fontSize: 11)),
-                                  const SizedBox(height: 2),
-                                  Text(_calculateTimeToSoc(80.0), style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 18, fontWeight: FontWeight.bold)),
-                                ],
-                              ),
-                            ),
-                          ),
+                          Expanded(child: Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6), decoration: BoxDecoration(color: const Color(0xFF1E242C), borderRadius: BorderRadius.circular(10), border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.3))), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text("80% 목표 도달", style: TextStyle(color: Colors.white54, fontSize: 11)), const SizedBox(height: 2), Text(_calculateTimeToSoc(80.0), style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 18, fontWeight: FontWeight.bold))]))),
                           const SizedBox(width: 8),
-                          Expanded(
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF1E242C),
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(color: const Color(0xFF00E676).withOpacity(0.3)),
-                              ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  const Text("100% 완전 충전", style: TextStyle(color: Colors.white54, fontSize: 11)),
-                                  const SizedBox(height: 2),
-                                  Text(_calculateTimeToSoc(100.0), style: const TextStyle(color: Color(0xFF00E676), fontSize: 18, fontWeight: FontWeight.bold)),
-                                ],
-                              ),
-                            ),
-                          ),
+                          Expanded(child: Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6), decoration: BoxDecoration(color: const Color(0xFF1E242C), borderRadius: BorderRadius.circular(10), border: Border.all(color: const Color(0xFF00E676).withOpacity(0.3))), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text("100% 완전 충전", style: TextStyle(color: Colors.white54, fontSize: 11)), const SizedBox(height: 2), Text(_calculateTimeToSoc(100.0), style: const TextStyle(color: Color(0xFF00E676), fontSize: 18, fontWeight: FontWeight.bold))]))),
                         ],
                       ),
                     ],
@@ -2165,19 +1929,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Widget _buildCampingTempItem({required String title, required String valueText, required Color valueColor}) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(title, style: const TextStyle(color: Colors.white54, fontSize: 11)),
-        const SizedBox(height: 2),
-        Text(valueText, style: TextStyle(color: valueColor, fontSize: 13, fontWeight: FontWeight.bold)),
-      ],
-    );
+    return Column(mainAxisSize: MainAxisSize.min, children: [Text(title, style: const TextStyle(color: Colors.white54, fontSize: 11)), const SizedBox(height: 2), Text(valueText, style: TextStyle(color: valueColor, fontSize: 13, fontWeight: FontWeight.bold))]);
   }
 
   Widget _buildBottomStatusBar() {
     Map<String, dynamic> tempGrade = _getBatteryTempGrade();
-    double totalConsumedKwh = _driveEnergyKwh + _hvacEnergyKwh;
+    double totalConsumedKwh = _energyDriveKwh + _energyPtcKwh + _energyAcKwh + _energyStandbyKwh;
     double consumedPct = (_batteryTotalKwh > 0) ? (totalConsumedKwh / _batteryTotalKwh) * 100.0 : 0.0;
     double liveConsumeWatts = (_voltage * _current).abs();
     if (liveConsumeWatts > 65000) liveConsumeWatts = 0.0;
@@ -2185,37 +1942,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        _buildBottomCard(
-          title: "운행시간 · 이번주행",
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.baseline,
-                textBaseline: TextBaseline.alphabetic,
-                children: [
-                  Text(_accumulatedRealTripKm.toStringAsFixed(1), style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 16, fontWeight: FontWeight.bold)),
-                  const SizedBox(width: 2),
-                  const Text("km", style: TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.bold)),
-                ],
-              ),
-              const SizedBox(height: 1),
-              Text(_formatDrivingTime(_drivingSeconds), style: const TextStyle(color: Colors.white54, fontSize: 11, fontWeight: FontWeight.w500)),
-            ],
-          ),
-        ),
-        _buildBottomCard(
-          title: "이번 운행 소모량",
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text("${totalConsumedKwh.toStringAsFixed(1)} kWh", style: const TextStyle(color: Color(0xFFFFB300), fontSize: 16, fontWeight: FontWeight.bold)),
-              const SizedBox(width: 4),
-              Text("(-${consumedPct.toStringAsFixed(1)}%)", style: const TextStyle(color: Color(0xFFFF5252), fontSize: 13, fontWeight: FontWeight.bold)),
-            ],
-          ),
-        ),
+        _buildBottomCard(title: "운행시간 · 이번주행", child: Column(mainAxisSize: MainAxisSize.min, children: [Row(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.baseline, textBaseline: TextBaseline.alphabetic, children: [Text(_accumulatedRealTripKm.toStringAsFixed(1), style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 16, fontWeight: FontWeight.bold)), const SizedBox(width: 2), const Text("km", style: TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.bold))]), const SizedBox(height: 1), Text(_formatDrivingTime(_drivingSeconds), style: const TextStyle(color: Colors.white54, fontSize: 11, fontWeight: FontWeight.w500))])),
+        _buildBottomCard(title: "이번 운행 소모량", child: Row(mainAxisSize: MainAxisSize.min, children: [Text("${totalConsumedKwh.toStringAsFixed(1)} kWh", style: const TextStyle(color: Color(0xFFFFB300), fontSize: 16, fontWeight: FontWeight.bold)), const SizedBox(width: 4), Text("(-${consumedPct.toStringAsFixed(1)}%)", style: const TextStyle(color: Color(0xFFFF5252), fontSize: 13, fontWeight: FontWeight.bold))])),
         _buildBottomCard(title: "실시간 소모 전력", child: Text("${liveConsumeWatts.toStringAsFixed(0)} W", style: TextStyle(color: liveConsumeWatts > 1000 ? const Color(0xFFFFB300) : Colors.white, fontSize: 16, fontWeight: FontWeight.bold))),
         _buildBottomCard(title: "배터리 건강(SOH)", child: Text("$_soh %", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 16, fontWeight: FontWeight.bold))),
         _buildBottomCard(
@@ -2224,27 +1952,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text("${_batteryTemp.toStringAsFixed(1)}°C", style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
-                  const SizedBox(width: 6),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                    decoration: BoxDecoration(color: (tempGrade['color'] as Color).withOpacity(0.2), borderRadius: BorderRadius.circular(4), border: Border.all(color: tempGrade['color'] as Color, width: 0.8)),
-                    child: Text("${tempGrade['grade']} (${tempGrade['amp']})", style: TextStyle(color: tempGrade['color'] as Color, fontSize: 11, fontWeight: FontWeight.bold)),
-                  ),
-                ],
-              ),
+              Row(mainAxisSize: MainAxisSize.min, children: [Text("${_batteryTemp.toStringAsFixed(1)}°C", style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)), const SizedBox(width: 6), Container(padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2), decoration: BoxDecoration(color: (tempGrade['color'] as Color).withOpacity(0.2), borderRadius: BorderRadius.circular(4), border: Border.all(color: tempGrade['color'] as Color, width: 0.8)), child: Text("${tempGrade['grade']} (${tempGrade['amp']})", style: TextStyle(color: tempGrade['color'] as Color, fontSize: 11, fontWeight: FontWeight.bold)))]),
               const SizedBox(height: 3),
               Stack(
                 alignment: Alignment.centerLeft,
                 children: [
                   Container(width: 90, height: 5, decoration: BoxDecoration(borderRadius: BorderRadius.circular(3), gradient: const LinearGradient(colors: [Color(0xFF2979FF), Color(0xFF00E5FF), Color(0xFF00E676), Color(0xFFFFD600), Color(0xFFFF9100), Color(0xFFFF5252)]))),
-                  Positioned(
-                    left: (((_batteryTemp + 10) / 70.0).clamp(0.0, 1.0) * 82),
-                    child: Container(width: 7, height: 7, decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle, boxShadow: [BoxShadow(color: Colors.black, blurRadius: 2)])),
-                  ),
+                  Positioned(left: (((_batteryTemp + 10) / 70.0).clamp(0.0, 1.0) * 82), child: Container(width: 7, height: 7, decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle, boxShadow: [BoxShadow(color: Colors.black, blurRadius: 2)]))),
                 ],
               ),
             ],
@@ -2258,7 +1972,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     double avgLoadPct = _loadSampleCount > 0 ? (_accumulatedLoadPct / _loadSampleCount) : 0.0;
     Map<String, dynamic> cellBal = _getCellBalanceStatus();
     Map<String, dynamic> loadGrade = _getLoadGrade(avgLoadPct);
-
     bool isChargingOrRegen = _chargePowerKw > 0.1;
     bool isFastCharge = _chargePowerKw > 10.0;
     String chargeLabel = isChargingOrRegen ? (isFastCharge ? "⚡ 급속 충전 중" : "🔌 완속 충전 중") : "⚡ 실시간 충전/회생";
@@ -2276,18 +1989,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 Text("${avgLoadPct.toStringAsFixed(1)}", style: TextStyle(color: loadGrade['color'] as Color, fontSize: 16, fontWeight: FontWeight.bold)),
                 const Text(" %", style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
                 const SizedBox(width: 6),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: (loadGrade['color'] as Color).withOpacity(0.2),
-                    borderRadius: BorderRadius.circular(4),
-                    border: Border.all(color: loadGrade['color'] as Color, width: 0.8),
-                  ),
-                  child: Text(
-                    "${loadGrade['text']}",
-                    style: TextStyle(color: loadGrade['color'] as Color, fontSize: 11, fontWeight: FontWeight.bold),
-                  ),
-                ),
+                Container(padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2), decoration: BoxDecoration(color: (loadGrade['color'] as Color).withOpacity(0.2), borderRadius: BorderRadius.circular(4), border: Border.all(color: loadGrade['color'] as Color, width: 0.8)), child: Text("${loadGrade['text']}", style: TextStyle(color: loadGrade['color'] as Color, fontSize: 11, fontWeight: FontWeight.bold))),
               ],
             ),
           ),
@@ -2300,34 +2002,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Text(
-                  "${_chargePowerKw.toStringAsFixed(1)} kW",
-                  style: TextStyle(
-                    color: isChargingOrRegen ? const Color(0xFFFFB300) : Colors.white70,
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
+                Text("${_chargePowerKw.toStringAsFixed(1)} kW", style: TextStyle(color: isChargingOrRegen ? const Color(0xFFFFB300) : Colors.white70, fontSize: 16, fontWeight: FontWeight.bold)),
                 const SizedBox(width: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF00E5FF).withOpacity(0.15),
-                    borderRadius: BorderRadius.circular(4),
-                    border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.4)),
-                  ),
-                  child: Text("80% ${_calculateTimeToSoc(80.0)}", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 11, fontWeight: FontWeight.bold)),
-                ),
+                Container(padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1), decoration: BoxDecoration(color: const Color(0xFF00E5FF).withOpacity(0.15), borderRadius: BorderRadius.circular(4), border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.4))), child: Text("80% ${_calculateTimeToSoc(80.0)}", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 11, fontWeight: FontWeight.bold))),
                 const SizedBox(width: 4),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF00E676).withOpacity(0.15),
-                    borderRadius: BorderRadius.circular(4),
-                    border: Border.all(color: const Color(0xFF00E676).withOpacity(0.4)),
-                  ),
-                  child: Text("100% ${_calculateTimeToSoc(100.0)}", style: const TextStyle(color: Color(0xFF00E676), fontSize: 11, fontWeight: FontWeight.bold)),
-                ),
+                Container(padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1), decoration: BoxDecoration(color: const Color(0xFF00E676).withOpacity(0.15), borderRadius: BorderRadius.circular(4), border: Border.all(color: const Color(0xFF00E676).withOpacity(0.4))), child: Text("100% ${_calculateTimeToSoc(100.0)}", style: const TextStyle(color: Color(0xFF00E676), fontSize: 11, fontWeight: FontWeight.bold))),
               ],
             ),
           ),
@@ -2342,15 +2021,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               children: [
                 Text("$_cellDeltaMv", style: TextStyle(color: cellBal['color'] as Color, fontSize: 16, fontWeight: FontWeight.bold)),
                 const Text(" mV ", style: TextStyle(color: Colors.white70, fontSize: 12)),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: (cellBal['color'] as Color).withOpacity(0.2),
-                    borderRadius: BorderRadius.circular(4),
-                    border: Border.all(color: cellBal['color'] as Color, width: 0.8),
-                  ),
-                  child: Text("${cellBal['status']}", style: TextStyle(color: cellBal['color'] as Color, fontSize: 11, fontWeight: FontWeight.bold)),
-                ),
+                Container(padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2), decoration: BoxDecoration(color: (cellBal['color'] as Color).withOpacity(0.2), borderRadius: BorderRadius.circular(4), border: Border.all(color: cellBal['color'] as Color, width: 0.8)), child: Text("${cellBal['status']}", style: TextStyle(color: cellBal['color'] as Color, fontSize: 11, fontWeight: FontWeight.bold))),
               ],
             ),
           ),
@@ -2364,19 +2035,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
       child: Container(
         margin: const EdgeInsets.symmetric(horizontal: 2.0),
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        decoration: BoxDecoration(
-          color: const Color(0xFF13171D),
-          borderRadius: BorderRadius.circular(9),
-          border: Border.all(color: const Color(0xFF222A35)),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(title, style: const TextStyle(color: Colors.white54, fontSize: 11, fontWeight: FontWeight.w500)),
-            const SizedBox(height: 2),
-            child,
-          ],
-        ),
+        decoration: BoxDecoration(color: const Color(0xFF13171D), borderRadius: BorderRadius.circular(9), border: Border.all(color: const Color(0xFF222A35))),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [Text(title, style: const TextStyle(color: Colors.white54, fontSize: 11, fontWeight: FontWeight.w500)), const SizedBox(height: 2), child]),
       ),
     );
   }
@@ -2384,19 +2044,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Widget _buildExtendedCard({required String title, required Widget child}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-      decoration: BoxDecoration(
-        color: const Color(0xFF13171D),
-        borderRadius: BorderRadius.circular(9),
-        border: Border.all(color: const Color(0xFF222A35)),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(title, style: const TextStyle(color: Colors.white54, fontSize: 11, fontWeight: FontWeight.w500)),
-          const SizedBox(height: 2),
-          child,
-        ],
-      ),
+      decoration: BoxDecoration(color: const Color(0xFF13171D), borderRadius: BorderRadius.circular(9), border: Border.all(color: const Color(0xFF222A35))),
+      child: Column(mainAxisSize: MainAxisSize.min, children: [Text(title, style: const TextStyle(color: Colors.white54, fontSize: 11, fontWeight: FontWeight.w500)), const SizedBox(height: 2), child]),
     );
   }
 }
