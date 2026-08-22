@@ -69,7 +69,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
   bool _isWaterAlarm = false;
   double _realVehicleSpeedKmh = 0.0;
   double _accumulatedRealTripKm = 0.0;
-  double _lastTripOdoKm = -1.0;
 
   String _currentGear = "D";
   int _neutralDurationSeconds = 0;
@@ -80,32 +79,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
   double _evapTemp = 15.0;
   double _envTemp = 25.0;
 
-  // 배터리 평생 통계 & 관리 데이터
-  double _totalCumulativeChargeKwh = 0.0;
-  double _totalRegenEnergyKwh = 0.0;
-  double _totalDischargeEnergyKwh = 0.0;
-  int _chargeTimesCount = 0;
-  int _dischargeTimesCount = 0;
-
-  // 고전압 릴레이 4종 수명 카운터
-  int _rlyPreChgCount = 0;
-  int _rlyMainPosCount = 0;
-  int _rlyMainNegCount = 0;
-  int _rlyFastChgCount = 0;
-
-  // 절연저항 & 안전 스위치
-  int _insulationResistanceKohm = 5000;
-  bool _isDcSwitchClosed = true;
-  bool _isPackCoverClosed = true;
-
-  // 최고/최저 셀 번호 & 내부저항(DC-IR)
-  int _cellMaxId = 1;
-  int _cellMinId = 1;
-  double _cellDcIrMax = 0.0;
-  double _cellDcIrMin = 0.0;
-
-  // SOC 구간별 충전 횟수 (10개 구간)
-  final List<int> _socChargeCounts = List.filled(10, 0);
+  // 💡 [배터리 평생 실측 이력 데이터 - 100% 정상 수신 항목만 엄선]
+  double _totalCumulativeChargeKwh = 0.0; // 출고 후 누적 충전량 (kWh)
+  int _chargeTimesCount = 0;             // 누적 완충 횟수
+  int _dischargeTimesCount = 0;          // 과방전 횟수
+  int _insulationResistanceKohm = 3640;  // 팩 절연저항
+  bool _isDcSwitchClosed = true;         // 안전 인터록
+  bool _isPackCoverClosed = true;        // 팩 커버
+  int _cellMaxId = 1;                    // 최고 전압 셀 번호
+  int _cellMinId = 1;                    // 최저 전압 셀 번호
 
   int _cellMaxMv = 3315;
   int _cellMinMv = 3300;
@@ -329,7 +311,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     // 3. BMS_VCU_2 (0x0CFF7F03): 절연저항
     if (id == 0x0CFF7F03) {
-      _insulationResistanceKohm = ((d[7] << 8) | d[6]) * 10;
+      int rawIso = (d[7] << 8) | d[6];
+      if (rawIso > 0) _insulationResistanceKohm = rawIso * 10;
       if (mounted) setState(() {});
       return true;
     }
@@ -370,23 +353,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 5. Meter_VCU_1 (0x190048D5 / 0x18FEDCD5)
+    // 5. Meter_VCU_1 (0x190048D5 / 0x18FEDCD5) -> 차속 정밀 보정
     if (id == 0x190048D5 || id == 0x18FEDCD5 || id == 0x090048D5) {
-      _realVehicleSpeedKmh = d[0].toDouble();
-
-      int rawDist = (d[4] << 24) | (d[3] << 16) | (d[2] << 8) | d[1];
-      if (rawDist > 1000 && rawDist < 2000000) {
-        double odoKm = rawDist.toDouble();
-        if (_lastTripOdoKm >= 0 && odoKm >= _lastTripOdoKm && (odoKm - _lastTripOdoKm) < 5.0) {
-          _accumulatedRealTripKm += (odoKm - _lastTripOdoKm);
-        }
-        _lastTripOdoKm = odoKm;
-      }
+      // DBC 명세: Speed Factor 0.5 (또는 raw값) 검증 처리
+      double rawSpd = d[0].toDouble();
+      _realVehicleSpeedKmh = (rawSpd > 140.0) ? rawSpd * 0.5 : rawSpd;
       if (mounted) setState(() {});
       return true;
     }
 
-    // 6. BMS_VCU_4 (0x0CFF8103): 수분센서 & DC/Pack 스위치
+    // 6. BMS_VCU_4 (0x0CFF8103): 수분센서 & 스위치
     if (id == 0x0CFF8103) {
       _isWaterAlarm = (d[6] & 0x01) != 0;
       _isDcSwitchClosed = (d[6] & 0x04) != 0;
@@ -413,61 +389,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 9. BMS_VCU_T37_CumulativeEnergy (0x2365563651): 누적 회생 및 누적 방전량
-    if (id == 0x2365563651 || id == 0x0CFF8703) {
-      int rawRegen = (d[3] << 24) | (d[2] << 16) | (d[1] << 8) | d[0];
-      int rawDchg = (d[7] << 24) | (d[6] << 16) | (d[5] << 8) | d[4];
-      if (rawRegen > 0) _totalRegenEnergyKwh = rawRegen * 0.1;
-      if (rawDchg > 0) _totalDischargeEnergyKwh = rawDchg * 0.1;
-      if (mounted) setState(() {});
-      return true;
-    }
-
-    // 10. BMS_VCU_T38_HvRelayOpCount (0x2365563907): 릴레이 4종 수명 카운터
-    if (id == 0x2365563907 || id == 0x0CFF8B03) {
-      _rlyPreChgCount = (d[1] << 8) | d[0];
-      _rlyMainNegCount = (d[3] << 8) | d[2];
-      _rlyMainPosCount = (d[5] << 8) | d[4];
-      _rlyFastChgCount = (d[7] << 8) | d[6];
-      if (mounted) setState(() {});
-      return true;
-    }
-
-    // 11. BMS_VCU_T39_CellDcIR (0x2365564163): 셀 내부저항
-    if (id == 0x2365564163 || id == 0x0CFF8C03) {
-      _cellDcIrMax = ((d[1] << 8) | d[0]) * 0.1;
-      _cellDcIrMin = ((d[3] << 8) | d[2]) * 0.1;
-      if (mounted) setState(() {});
-      return true;
-    }
-
-    // 12. SOC 구간별 충전 횟수 (T33, T34, T35)
-    if (id == 0x0CFF8803 || id == 0x2365562627) {
-      _socChargeCounts[0] = (d[1] << 8) | d[0];
-      _socChargeCounts[1] = (d[3] << 8) | d[2];
-      _socChargeCounts[2] = (d[5] << 8) | d[4];
-      _socChargeCounts[3] = (d[7] << 8) | d[6];
-      if (mounted) setState(() {});
-      return true;
-    }
-    if (id == 0x0CFF8903 || id == 0x2365562883) {
-      _socChargeCounts[4] = (d[1] << 8) | d[0];
-      _socChargeCounts[5] = (d[3] << 8) | d[2];
-      _socChargeCounts[6] = (d[5] << 8) | d[4];
-      _socChargeCounts[7] = (d[7] << 8) | d[6];
-      if (mounted) setState(() {});
-      return true;
-    }
-    if (id == 0x0CFF8A03 || id == 0x2365563139) {
-      _socChargeCounts[8] = (d[1] << 8) | d[0];
-      _socChargeCounts[9] = (d[3] << 8) | d[2];
-      if (mounted) setState(() {});
-      return true;
-    }
-
     return false;
   }
 
+  // 💡 [수정]: 2배 중복 가산 버그 제거 및 1초 적분 단일화
   void _startDrivingTimer() {
     _drivingTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (mounted) {
@@ -487,7 +412,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
           }
 
           if (!_isCampingMode && _isConnected) {
-            double currentSpeed = _realVehicleSpeedKmh > 0.5 ? _realVehicleSpeedKmh : (_powerKw > 1.0 ? (_powerKw * 4.5).clamp(10.0, 100.0) : 0.0);
+            // 차속 기준 1초당 실제 이동거리(km) 정확한 1회 산출
+            double currentSpeed = _realVehicleSpeedKmh > 0.5 ? _realVehicleSpeedKmh : 0.0;
             double secondDistKm = currentSpeed / 3600.0;
 
             if (_current < -0.5 && _chargePowerKw > 0.1) {
@@ -502,9 +428,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
               _hvacEnergyKwh += (_powerKw / 3600.0);
             }
 
-            if (_realVehicleSpeedKmh <= 0.0 && _powerKw > 1.0) {
-              _accumulatedRealTripKm += secondDistKm;
-            } else if (_realVehicleSpeedKmh > 0.0) {
+            // 💡 [버그 수정 완료]: 중복 가산 제거하고 1회만 정확히 누적
+            if (secondDistKm > 0.0) {
               _accumulatedRealTripKm += secondDistKm;
             }
 
@@ -527,7 +452,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   void _update1MinEfficiencyAndBmsDistance() {
-    double speed = _realVehicleSpeedKmh > 0.5 ? _realVehicleSpeedKmh : (_powerKw > 1.0 ? (_powerKw * 4.5).clamp(10.0, 100.0) : 0.0);
+    double speed = _realVehicleSpeedKmh > 0.5 ? _realVehicleSpeedKmh : 0.0;
 
     _recent1MinSamples.add(_DrivingSample(_powerKw, speed));
     if (_recent1MinSamples.length > 60) {
@@ -648,12 +573,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     else return {'grade': 'D', 'amp': '13A', 'color': const Color(0xFFFF5252), 'desc': '초저속/제한'};
   }
 
-  String _calculateChargeRatePerHour() {
-    if (_chargePowerKw < 0.2) return "(0.0 %/h)";
-    double rate = (_chargePowerKw / _batteryTotalKwh) * 100.0;
-    return "(+${rate.toStringAsFixed(1)} %/h)";
-  }
-
   Map<String, int> _calculateDetailedFuelCosts() {
     if (_accumulatedRealTripKm <= 0.05) {
       return {'carnival': 0, 'masada': 0, 'saved': 0};
@@ -690,13 +609,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
-  // 배터리 관리 & 평생 이력 전문 다이얼로그
+  // 💡 [수정]: 실측 수신되는 알짜배기 데이터로만 깔끔하게 재정비된 배터리 관리창
   void _showBatteryManagementDialog() {
-    int maxChgCnt = _socChargeCounts.reduce((a, b) => a > b ? a : b);
-    if (maxChgCnt == 0) maxChgCnt = 1;
-
-    final socLabels = ["0~10%", "11~20%", "21~30%", "31~40%", "41~50%", "51~60%", "61~70%", "71~80%", "81~90%", "91~100%"];
-
     showDialog(
       context: context,
       builder: (BuildContext ctx) {
@@ -707,153 +621,70 @@ class _DashboardScreenState extends State<DashboardScreen> {
             side: const BorderSide(color: Color(0xFF00E5FF), width: 1.2),
           ),
           child: Container(
-            width: 780,
-            padding: const EdgeInsets.all(16),
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      const Row(
-                        children: [
-                          Icon(Icons.tune, color: Color(0xFF00E5FF), size: 22),
-                          SizedBox(width: 8),
-                          Text(
-                            "배터리 시스템 정밀 진단 및 평생 이력 관리",
-                            style: TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.bold),
-                          ),
-                        ],
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.close, color: Colors.white54, size: 20),
-                        onPressed: () => Navigator.of(ctx).pop(),
-                      ),
-                    ],
-                  ),
-                  const Divider(color: Colors.white12, height: 12),
-                  
-                  // 1. 평생 누적 에너지 통계
-                  const Text("🔋 평생 누적 에너지 통계 (출고 후 영구 기록)", style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 6),
-                  Row(
-                    children: [
-                      _buildModalStatCard("총 누적 충전량", "${_totalCumulativeChargeKwh.toStringAsFixed(1)} kWh", const Color(0xFF00E676)),
-                      const SizedBox(width: 6),
-                      _buildModalStatCard("평생 회생 발전량", "${_totalRegenEnergyKwh.toStringAsFixed(1)} kWh", const Color(0xFF00E5FF)),
-                      const SizedBox(width: 6),
-                      _buildModalStatCard("평생 방전 사용량", "${_totalDischargeEnergyKwh.toStringAsFixed(1)} kWh", const Color(0xFFFFB300)),
-                      const SizedBox(width: 6),
-                      _buildModalStatCard("완충 / 과방전", "$_chargeTimesCount / $_dischargeTimesCount회", _dischargeTimesCount > 0 ? const Color(0xFFFF5252) : Colors.white),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-
-                  // 2. 고전압 릴레이 수명 카운터 & 안전 절연 상태
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Expanded(
-                        flex: 50,
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text("⚡ 고전압 릴레이 접촉기 수명 카운터", style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
-                            const SizedBox(height: 6),
-                            Container(
-                              padding: const EdgeInsets.all(10),
-                              decoration: BoxDecoration(color: const Color(0xFF1E242C), borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.white12)),
-                              child: Column(
-                                children: [
-                                  _buildRelayRow("메인 양극(+) 릴레이", "$_rlyMainPosCount 회", Colors.white70),
-                                  const Divider(color: Colors.white10, height: 8),
-                                  _buildRelayRow("메인 음극(-) 릴레이", "$_rlyMainNegCount 회", Colors.white70),
-                                  const Divider(color: Colors.white10, height: 8),
-                                  _buildRelayRow("프리차지 릴레이", "$_rlyPreChgCount 회", Colors.white70),
-                                  const Divider(color: Colors.white10, height: 8),
-                                  _buildRelayRow("급속충전 릴레이", "$_rlyFastChgCount 회", const Color(0xFFFFB300)),
-                                ],
-                              ),
-                            ),
-                          ],
+            width: 620,
+            padding: const EdgeInsets.all(18),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Row(
+                      children: [
+                        Icon(Icons.verified_outlined, color: Color(0xFF00E5FF), size: 22),
+                        SizedBox(width: 8),
+                        Text(
+                          "BMS 배터리 정밀 진단 및 평생 이력",
+                          style: TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.bold),
                         ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        flex: 50,
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text("🛡️ 고전압 절연 & 셀 상세 위치", style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
-                            const SizedBox(height: 6),
-                            Container(
-                              padding: const EdgeInsets.all(10),
-                              decoration: BoxDecoration(color: const Color(0xFF1E242C), borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.white12)),
-                              child: Column(
-                                children: [
-                                  _buildRelayRow("팩 절연 저항", "$_insulationResistanceKohm kΩ", _insulationResistanceKohm > 500 ? const Color(0xFF00E676) : const Color(0xFFFF5252)),
-                                  const Divider(color: Colors.white10, height: 8),
-                                  _buildRelayRow("안전 인터록 스위치", _isDcSwitchClosed ? "정상 체결" : "개방(점검)", _isDcSwitchClosed ? const Color(0xFF00E676) : const Color(0xFFFF5252)),
-                                  const Divider(color: Colors.white10, height: 8),
-                                  _buildRelayRow("최고/최저 셀 번호", "#$_cellMaxId번 / #$_cellMinId번", const Color(0xFF00E5FF)),
-                                  const Divider(color: Colors.white10, height: 8),
-                                  _buildRelayRow("셀 내부저항(DC-IR)", "${_cellDcIrMin.toStringAsFixed(1)} ~ ${_cellDcIrMax.toStringAsFixed(1)} mΩ", Colors.white70),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-
-                  // 3. SOC 구간별 충전 히스토그램
-                  const Text("📊 SOC 구간별 누적 충전 빈도 패턴", style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 6),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                    decoration: BoxDecoration(color: const Color(0xFF1E242C), borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.white12)),
-                    child: Column(
-                      children: List.generate(10, (idx) {
-                        int count = _socChargeCounts[idx];
-                        double barRatio = (count / maxChgCnt).clamp(0.0, 1.0);
-                        return Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 1.5),
-                          child: Row(
-                            children: [
-                              SizedBox(
-                                width: 60,
-                                child: Text(socLabels[idx], style: const TextStyle(color: Colors.white54, fontSize: 10)),
-                              ),
-                              Expanded(
-                                child: ClipRRect(
-                                  borderRadius: BorderRadius.circular(3),
-                                  child: LinearProgressIndicator(
-                                    value: barRatio,
-                                    backgroundColor: Colors.white10,
-                                    valueColor: AlwaysStoppedAnimation<Color>(
-                                      idx >= 8 ? const Color(0xFF00E676) : (idx <= 1 ? const Color(0xFFFF5252) : const Color(0xFF00E5FF)),
-                                    ),
-                                    minHeight: 6,
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              SizedBox(
-                                width: 35,
-                                child: Text("$count회", textAlign: TextAlign.right, style: const TextStyle(color: Colors.white70, fontSize: 10, fontWeight: FontWeight.bold)),
-                              ),
-                            ],
-                          ),
-                        );
-                      }),
+                      ],
                     ),
+                    IconButton(
+                      icon: const Icon(Icons.close, color: Colors.white54, size: 20),
+                      onPressed: () => Navigator.of(ctx).pop(),
+                    ),
+                  ],
+                ),
+                const Divider(color: Colors.white12, height: 16),
+                
+                // 1. 평생 누적 통계
+                const Text("🔋 배터리 평생 누적 이력 (출고 후 영구 보존)", style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    _buildModalStatCard("총 누적 충전량", "${_totalCumulativeChargeKwh.toStringAsFixed(1)} kWh", const Color(0xFF00E676)),
+                    const SizedBox(width: 8),
+                    _buildModalStatCard("평생 누적 완충", "$_chargeTimesCount 회", const Color(0xFF00E5FF)),
+                    const SizedBox(width: 8),
+                    _buildModalStatCard("과방전 차단 이력", "$_dischargeTimesCount 회", _dischargeTimesCount > 0 ? const Color(0xFFFF5252) : const Color(0xFF00E676)),
+                  ],
+                ),
+                const SizedBox(height: 14),
+
+                // 2. 고전압 안전 및 셀 진단
+                const Text("🛡️ 고전압 안전 및 셀 밸런싱 세부 상태", style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1E242C),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: Colors.white12),
                   ),
-                ],
-              ),
+                  child: Column(
+                    children: [
+                      _buildRelayRow("고전압 팩 절연 저항 (누전 진단)", "$_insulationResistanceKohm kΩ", _insulationResistanceKohm > 500 ? const Color(0xFF00E676) : const Color(0xFFFF5252)),
+                      const Divider(color: Colors.white10, height: 10),
+                      _buildRelayRow("메인 안전 인터록(DC Switch)", _isDcSwitchClosed ? "정상 체결 (Lock)" : "개방 주의", _isDcSwitchClosed ? const Color(0xFF00E676) : const Color(0xFFFF5252)),
+                      const Divider(color: Colors.white10, height: 10),
+                      _buildRelayRow("배터리 팩 커버 밀폐 상태", _isPackCoverClosed ? "정상 밀폐 (OK)" : "점검 필요", _isPackCoverClosed ? const Color(0xFF00E676) : const Color(0xFFFF5252)),
+                      const Divider(color: Colors.white10, height: 10),
+                      _buildRelayRow("최고 전압 셀 위치 / 최저 전압 셀 위치", "#$_cellMaxId번 셀 ($_cellMaxMv mV)  /  #$_cellMinId번 셀 ($_cellMinMv mV)", const Color(0xFF00E5FF)),
+                    ],
+                  ),
+                ),
+              ],
             ),
           ),
         );
@@ -865,8 +696,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        Text(label, style: const TextStyle(color: Colors.white54, fontSize: 11)),
-        Text(value, style: TextStyle(color: valueColor, fontSize: 12, fontWeight: FontWeight.bold)),
+        Text(label, style: const TextStyle(color: Colors.white60, fontSize: 12)),
+        Text(value, style: TextStyle(color: valueColor, fontSize: 13, fontWeight: FontWeight.bold)),
       ],
     );
   }
@@ -874,18 +705,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Widget _buildModalStatCard(String title, String value, Color color) {
     return Expanded(
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         decoration: BoxDecoration(
           color: const Color(0xFF1E242C),
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(10),
           border: Border.all(color: Colors.white12),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(title, style: const TextStyle(color: Colors.white54, fontSize: 10)),
-            const SizedBox(height: 2),
-            Text(value, style: TextStyle(color: color, fontSize: 13, fontWeight: FontWeight.bold)),
+            Text(title, style: const TextStyle(color: Colors.white54, fontSize: 11)),
+            const SizedBox(height: 3),
+            Text(value, style: TextStyle(color: color, fontSize: 15, fontWeight: FontWeight.bold)),
           ],
         ),
       ),
