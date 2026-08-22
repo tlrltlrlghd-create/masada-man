@@ -74,6 +74,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
   String _currentGear = "D";
   int _neutralDurationSeconds = 0;
 
+  // 실시간 악셀 & 공조 3종 온도 데이터
+  int _accelPedalPct = 0; // 0 ~ 100%
+  double _ptcTemp = 20.0; // 히터 PTC 온도 (-50 ~ 215°C)
+  double _evapTemp = 15.0; // 에어컨 에바포레이터 온도 (-50 ~ 215°C)
+  double _envTemp = 25.0; // 외기 온도 (-50 ~ 215°C)
+
   int _cellMaxMv = 3315;
   int _cellMinMv = 3300;
   int _cellDeltaMv = 15;
@@ -98,11 +104,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
   void initState() {
     super.initState();
     _startDrivingTimer();
-    _connectDirectlyToLogger();
-    // 2초 간격으로 자동 연결 감시 (단독 연결 유지)
-    _autoConnectTimer = Timer.periodic(const Duration(seconds: 2), (timer) {
+    _connectToLogger();
+    _autoConnectTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
       if (!_isConnected && !_isConnecting) {
-        _connectDirectlyToLogger();
+        _connectToLogger();
       }
     });
   }
@@ -116,29 +121,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
     super.dispose();
   }
 
-  // 💡 [순정 로거 단독 깨우기 및 스트림 활성화 핸드셰이크]
-  void _sendWakeupHandshake() {
-    if (_connection == null || !_connection!.isConnected) return;
-
-    try {
-      // 1. ELM327 계열 텍스트 기동 시퀀스
-      _connection!.output.add(ascii.encode("ATZ\r\n"));
-      _connection!.output.add(ascii.encode("ATE0\r\n"));
-      _connection!.output.add(ascii.encode("ATH1\r\n"));
-      _connection!.output.add(ascii.encode("ATSP6\r\n"));
-      _connection!.output.add(ascii.encode("ATMA\r\n"));
-
-      // 2. 바이너리 순정 로거 기동 프레임 주입
-      _connection!.output.add(Uint8List.fromList([0xAA, 0x55, 0x01, 0x01, 0x00, 0x00]));
-      _connection!.output.add(Uint8List.fromList([0xAA, 0x55, 0x02, 0x00, 0x00, 0x00]));
-      _connection!.output.allSent;
-    } catch (_) {}
-  }
-
   void _startHeartbeat() {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (_isConnected && _connection != null && _connection!.isConnected) {
+      if (_isConnected && _connection != null) {
         try {
           _connection!.output.add(Uint8List.fromList([0xAA, 0x55, 0x01, 0x00, 0x00, 0x00]));
           _connection!.output.add(ascii.encode("AT\r\n"));
@@ -148,8 +134,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     });
   }
 
-  // 💡 [순정 앱 불필요 - 단독 다이렉트 RFCOMM 소켓 연결 엔진]
-  Future<void> _connectDirectlyToLogger() async {
+  Future<void> _connectToLogger() async {
     if (_isConnected || _isConnecting) return;
     if (mounted) setState(() => _isConnecting = true);
 
@@ -160,13 +145,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
           _connection!.dispose();
         } catch (_) {}
         _connection = null;
-        await Future.delayed(const Duration(milliseconds: 200));
+        await Future.delayed(const Duration(milliseconds: 300));
       }
 
       List<BluetoothDevice> devices = await FlutterBluetoothSerial.instance.getBondedDevices();
       BluetoothDevice? targetDevice;
 
-      // 1순위: F0D6 등 순정 로거 ID 매칭
       for (var d in devices) {
         String name = (d.name ?? '').toUpperCase();
         if (name.contains('F0D6') || name.contains('OBD') || name.contains('EV') || name.contains('MASADA') || name.contains('LOGGER')) {
@@ -178,11 +162,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       targetDevice ??= devices.isNotEmpty ? devices.first : null;
 
       if (targetDevice != null) {
-        // 단독 RFCOMM 소켓 직접 오픈
         _connection = await BluetoothConnection.toAddress(targetDevice.address);
-        
-        // 연결 즉시 모듈 활성화 명령 전송
-        _sendWakeupHandshake();
         _startHeartbeat();
 
         if (mounted) {
@@ -321,20 +301,35 @@ class _DashboardScreenState extends State<DashboardScreen> {
     // 3. VCU_Meter (0x19014801 / 0x18FF50E5 / 0x18FFDC01)
     if (id == 0x19014801 || id == 0x18FF50E5 || id == 0x18FFDC01 || id == 0x09014801) {
       int rawGear = (d[4] >> 2) & 0x03;
-      if (rawGear == 0) {
-        _currentGear = "N";
-      } else if (rawGear == 1) {
-        _currentGear = "D";
-      } else if (rawGear == 2) {
-        _currentGear = "R";
-      } else if (rawGear == 3) {
-        _currentGear = "P";
-      }
+      if (rawGear == 0) _currentGear = "N";
+      else if (rawGear == 1) _currentGear = "D";
+      else if (rawGear == 2) _currentGear = "R";
+      else if (rawGear == 3) _currentGear = "P";
 
       if (_currentGear == "D" && _isCampingMode) {
         _isCampingMode = false;
         _neutralDurationSeconds = 0;
       }
+
+      if (d[3] >= 0 && d[3] <= 100) {
+        _accelPedalPct = d[3];
+      }
+
+      int rawEnv = d[5];
+      if (rawEnv >= 0 && rawEnv <= 255) {
+        _envTemp = (rawEnv - 50).toDouble();
+      }
+
+      int rawEvap = d[6];
+      if (rawEvap >= 0 && rawEvap <= 255) {
+        _evapTemp = (rawEvap - 50).toDouble();
+      }
+
+      int rawPtc = d[7];
+      if (rawPtc >= 0 && rawPtc <= 255) {
+        _ptcTemp = (rawPtc - 50).toDouble();
+      }
+
       if (mounted) setState(() {});
       return true;
     }
@@ -704,7 +699,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ),
             const SizedBox(width: 8),
             GestureDetector(
-              onTap: _connectDirectlyToLogger,
+              onTap: _connectToLogger,
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
                 decoration: BoxDecoration(
@@ -742,6 +737,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  // 💡 [캠핑 모드: 공조 3종 실시간 온도(외기, 에어컨 에바, 히터 PTC) 통합 배치]
   Widget _buildCampingDashboard() {
     double liveWatts = (_voltage * _current).abs();
     if (liveWatts > 65000) liveWatts = 0.0;
@@ -749,57 +745,77 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     return Row(
       children: [
+        // 좌측 패널: 배터리 잔량 & 실시간 소모량 & 공조 3종 온도
         Expanded(
-          flex: 4,
+          flex: 45,
           child: Container(
-            padding: const EdgeInsets.all(14),
+            padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
               color: const Color(0xFF13171D),
               borderRadius: BorderRadius.circular(16),
               border: Border.all(color: const Color(0xFFFFB300).withOpacity(0.4)),
             ),
             child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text("현재 배터리 잔량", style: TextStyle(color: Colors.white54, fontSize: 15)),
-                const SizedBox(height: 3),
+                const Text("현재 배터리 잔량", style: TextStyle(color: Colors.white54, fontSize: 13)),
                 Text(
                   "${_soc.toStringAsFixed(1)} %",
-                  style: const TextStyle(color: Color(0xFF00E676), fontSize: 48, fontWeight: FontWeight.bold),
+                  style: const TextStyle(color: Color(0xFF00E676), fontSize: 44, fontWeight: FontWeight.bold),
                 ),
-                const Divider(color: Colors.white12, height: 14),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceAround,
                   children: [
                     Column(
                       children: [
-                        const Text("실시간 소모 전력", style: TextStyle(color: Colors.white54, fontSize: 13)),
+                        const Text("실시간 소모 전력", style: TextStyle(color: Colors.white54, fontSize: 12)),
                         const SizedBox(height: 2),
                         Text(
                           "${liveWatts.toStringAsFixed(0)} W",
-                          style: const TextStyle(color: Color(0xFFFFB300), fontSize: 22, fontWeight: FontWeight.bold),
+                          style: const TextStyle(color: Color(0xFFFFB300), fontSize: 18, fontWeight: FontWeight.bold),
                         ),
                       ],
                     ),
                     Column(
                       children: [
-                        const Text("시간당 소모율", style: TextStyle(color: Colors.white54, fontSize: 13)),
+                        const Text("시간당 소모율", style: TextStyle(color: Colors.white54, fontSize: 12)),
                         const SizedBox(height: 2),
                         Text(
                           "${percentPerHour.toStringAsFixed(1)} %/h",
-                          style: const TextStyle(color: Colors.cyanAccent, fontSize: 22, fontWeight: FontWeight.bold),
+                          style: const TextStyle(color: Colors.cyanAccent, fontSize: 18, fontWeight: FontWeight.bold),
                         ),
                       ],
                     ),
                   ],
+                ),
+                const Divider(color: Colors.white12, height: 10),
+                // 💡 [캠핑모드 전용 공조 3종 온도 상태바]
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1A212B),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.white12),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceAround,
+                    children: [
+                      _buildCampingTempItem(title: "🌡️ 외기", valueText: "${_envTemp.toStringAsFixed(1)}°C", valueColor: Colors.orangeAccent),
+                      Container(width: 1, height: 22, color: Colors.white24),
+                      _buildCampingTempItem(title: "❄️ 에어컨", valueText: "${_evapTemp.toStringAsFixed(1)}°C", valueColor: const Color(0xFF00E5FF)),
+                      Container(width: 1, height: 22, color: Colors.white24),
+                      _buildCampingTempItem(title: "🔥 히터PTC", valueText: "${_ptcTemp.toStringAsFixed(1)}°C", valueColor: Colors.redAccent),
+                    ],
+                  ),
                 ),
               ],
             ),
           ),
         ),
         const SizedBox(width: 10),
+        // 우측 패널: 복귀 마진(20%) & 완전방전 한계 마진(0%)
         Expanded(
-          flex: 6,
+          flex: 55,
           child: Column(
             children: [
               Expanded(
@@ -810,7 +826,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   accentColor: const Color(0xFF00E5FF),
                 ),
               ),
-              const SizedBox(height: 10),
+              const SizedBox(height: 8),
               Expanded(
                 child: _buildCampingTimeCard(
                   title: "⚠️ 한계 마진 (배터리 0% 완전 방전까지)",
@@ -822,6 +838,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ],
           ),
         ),
+      ],
+    );
+  }
+
+  Widget _buildCampingTempItem({required String title, required String valueText, required Color valueColor}) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(title, style: const TextStyle(color: Colors.white54, fontSize: 11)),
+        const SizedBox(height: 2),
+        Text(valueText, style: TextStyle(color: valueColor, fontSize: 13, fontWeight: FontWeight.bold)),
       ],
     );
   }
@@ -847,14 +874,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(title, style: const TextStyle(color: Colors.white70, fontSize: 15, fontWeight: FontWeight.w500)),
-              Text(subInfo, style: const TextStyle(color: Colors.white38, fontSize: 13)),
+              Text(title, style: const TextStyle(color: Colors.white70, fontSize: 14, fontWeight: FontWeight.w500)),
+              Text(subInfo, style: const TextStyle(color: Colors.white38, fontSize: 12)),
             ],
           ),
           const SizedBox(height: 4),
           Text(
             remainingTime,
-            style: TextStyle(color: accentColor, fontSize: 36, fontWeight: FontWeight.bold),
+            style: TextStyle(color: accentColor, fontSize: 34, fontWeight: FontWeight.bold),
           ),
         ],
       ),
@@ -924,53 +951,194 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   Widget _buildCenterSocGauge() {
     Color effThemeColor = _getEfficiencyColor(_efficiencyScore);
+    double accelRatio = (_accelPedalPct / 100.0).clamp(0.0, 1.0);
+
+    double ptcRatio = ((_ptcTemp - 15.0) / 65.0).clamp(0.0, 1.0);
+    double acRatio = ((25.0 - _evapTemp) / 25.0).clamp(0.0, 1.0);
+
     return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
       decoration: BoxDecoration(
         color: const Color(0xFF13171D),
         borderRadius: BorderRadius.circular(18),
         border: Border.all(color: const Color(0xFF222A35)),
       ),
-      child: Center(
-        child: Stack(
-          alignment: Alignment.center,
-          children: [
-            SizedBox(
-              width: 320,
-              height: 320,
-              child: CircularProgressIndicator(
-                value: (_soc / 100.0).clamp(0.0, 1.0),
-                strokeWidth: 24,
-                backgroundColor: const Color(0xFF222A35),
-                valueColor: AlwaysStoppedAnimation<Color>(effThemeColor),
+      child: Stack(
+        children: [
+          Align(
+            alignment: Alignment.topCenter,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1E242C),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.white24, width: 0.8),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.thermostat_outlined, color: Colors.orangeAccent, size: 14),
+                  const SizedBox(width: 4),
+                  Text(
+                    "외기온도 ${_envTemp.toStringAsFixed(1)}°C",
+                    style: const TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold),
+                  ),
+                ],
               ),
             ),
-            Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.baseline,
-                  textBaseline: TextBaseline.alphabetic,
+          ),
+          Row(
+            children: [
+              Expanded(
+                flex: 15,
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Text(_pureDriveTripEfficiency.toStringAsFixed(1), style: TextStyle(color: effThemeColor, fontSize: 32, fontWeight: FontWeight.bold)),
-                    const SizedBox(width: 5),
-                    Text("km/kWh", style: TextStyle(color: effThemeColor.withOpacity(0.85), fontSize: 20, fontWeight: FontWeight.bold)),
+                    const Text("ACCEL", style: TextStyle(color: Colors.white54, fontSize: 11, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 2),
+                    Text("$_accelPedalPct%", style: const TextStyle(color: Color(0xFF00E676), fontSize: 13, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 6),
+                    Expanded(
+                      child: Container(
+                        width: 14,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF222A35),
+                          borderRadius: BorderRadius.circular(7),
+                        ),
+                        child: LayoutBuilder(
+                          builder: (context, constraints) {
+                            return Align(
+                              alignment: Alignment.bottomCenter,
+                              child: Container(
+                                width: 14,
+                                height: constraints.maxHeight * accelRatio,
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF00E676),
+                                  borderRadius: BorderRadius.circular(7),
+                                  boxShadow: const [
+                                    BoxShadow(color: Color(0xFF00E676), blurRadius: 4, spreadRadius: 1),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    const Text("0%", style: TextStyle(color: Colors.white30, fontSize: 10)),
                   ],
                 ),
-                const SizedBox(height: 2),
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.baseline,
-                  textBaseline: TextBaseline.alphabetic,
+              ),
+              Expanded(
+                flex: 70,
+                child: Center(
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      SizedBox(
+                        width: 250,
+                        height: 250,
+                        child: CircularProgressIndicator(
+                          value: (_soc / 100.0).clamp(0.0, 1.0),
+                          strokeWidth: 20,
+                          backgroundColor: const Color(0xFF222A35),
+                          valueColor: AlwaysStoppedAnimation<Color>(effThemeColor),
+                        ),
+                      ),
+                      Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const SizedBox(height: 10),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.baseline,
+                            textBaseline: TextBaseline.alphabetic,
+                            children: [
+                              Text(_pureDriveTripEfficiency.toStringAsFixed(1), style: TextStyle(color: effThemeColor, fontSize: 26, fontWeight: FontWeight.bold)),
+                              const SizedBox(width: 4),
+                              Text("km/kWh", style: TextStyle(color: effThemeColor.withOpacity(0.85), fontSize: 16, fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                          const SizedBox(height: 2),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.baseline,
+                            textBaseline: TextBaseline.alphabetic,
+                            children: [
+                              Text(_soc.toStringAsFixed(1), style: TextStyle(color: effThemeColor, fontSize: 58, fontWeight: FontWeight.bold)),
+                              Text("%", style: TextStyle(color: effThemeColor, fontSize: 24, fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              Expanded(
+                flex: 15,
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Text(_soc.toStringAsFixed(1), style: TextStyle(color: effThemeColor, fontSize: 72, fontWeight: FontWeight.bold)),
-                    Text("%", style: TextStyle(color: effThemeColor, fontSize: 30, fontWeight: FontWeight.bold)),
+                    const Text("히터PTC", style: TextStyle(color: Colors.redAccent, fontSize: 10, fontWeight: FontWeight.bold)),
+                    Text("${_ptcTemp.toStringAsFixed(0)}°C", style: const TextStyle(color: Colors.redAccent, fontSize: 12, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 4),
+                    Expanded(
+                      child: Container(
+                        width: 14,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF222A35),
+                          borderRadius: BorderRadius.circular(7),
+                        ),
+                        child: LayoutBuilder(
+                          builder: (context, constraints) {
+                            double halfHeight = constraints.maxHeight / 2.0;
+                            return Stack(
+                              children: [
+                                Align(
+                                  alignment: Alignment.center,
+                                  child: Container(width: 14, height: 2, color: Colors.white54),
+                                ),
+                                Positioned(
+                                  bottom: halfHeight,
+                                  left: 0,
+                                  right: 0,
+                                  child: Container(
+                                    height: halfHeight * ptcRatio,
+                                    decoration: const BoxDecoration(
+                                      color: Colors.redAccent,
+                                      borderRadius: BorderRadius.vertical(top: Radius.circular(7)),
+                                    ),
+                                  ),
+                                ),
+                                Positioned(
+                                  top: halfHeight,
+                                  left: 0,
+                                  right: 0,
+                                  child: Container(
+                                    height: halfHeight * acRatio,
+                                    decoration: const BoxDecoration(
+                                      color: Color(0xFF00E5FF),
+                                      borderRadius: BorderRadius.vertical(bottom: Radius.circular(7)),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text("${_evapTemp.toStringAsFixed(0)}°C", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 12, fontWeight: FontWeight.bold)),
+                    const Text("에어컨", style: TextStyle(color: Color(0xFF00E5FF), fontSize: 10, fontWeight: FontWeight.bold)),
                   ],
                 ),
-              ],
-            ),
-          ],
-        ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -1215,7 +1383,26 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        _buildBottomCard(title: "운행 시간", child: Text(_formatDrivingTime(_drivingSeconds), style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 16, fontWeight: FontWeight.bold))),
+        _buildBottomCard(
+          title: "운행시간 · 이번주행",
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.baseline,
+                textBaseline: TextBaseline.alphabetic,
+                children: [
+                  Text(_accumulatedRealTripKm.toStringAsFixed(1), style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 16, fontWeight: FontWeight.bold)),
+                  const SizedBox(width: 2),
+                  const Text("km", style: TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.bold)),
+                ],
+              ),
+              const SizedBox(height: 1),
+              Text(_formatDrivingTime(_drivingSeconds), style: const TextStyle(color: Colors.white54, fontSize: 11, fontWeight: FontWeight.w500)),
+            ],
+          ),
+        ),
         _buildBottomCard(
           title: "이번 운행 소모량",
           child: Row(
