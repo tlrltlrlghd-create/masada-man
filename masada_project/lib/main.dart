@@ -47,8 +47,8 @@ class DashboardScreen extends StatefulWidget {
 class _DashboardScreenState extends State<DashboardScreen> {
   bool _isCampingMode = false;
   late PageController _pageController;
-  int _currentThemeIndex = 0; // 0: 테마B(세로), 1: 테마C(나이트), 2: 테마D(에코)
-  static const int _virtualInitialPage = 1000;
+  int _currentThemeIndex = 0; // 0: 세로, 1: 나이트, 2: 에코
+  static const int _virtualInitialPage = 999; // 999 % 3 == 0 (세로 모드로 첫 실행 고정)
   static const double _batteryTotalKwh = 38.7;
 
   BluetoothConnection? _connection;
@@ -795,14 +795,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         physics: const BouncingScrollPhysics(),
                         onPageChanged: (pageIndex) {
                           setState(() {
-                            _currentThemeIndex = pageIndex % 3; // 3종 테마 순환 (세로, 나이트, 에코)
+                            _currentThemeIndex = pageIndex % 3;
                           });
                         },
                         itemBuilder: (context, index) {
                           int theme = index % 3;
-                          if (theme == 0) return _buildThemeBDriverDashboard(); // 1번: 테마B(세로)
-                          if (theme == 1) return _buildThemeCNightDashboard();    // 2번: 테마C(나이트)
-                          return _buildThemeDEcoDashboard();                       // 3번: 테마D(에코)
+                          if (theme == 0) return _buildThemeDriverDashboard(); // 1번: 세로
+                          if (theme == 1) return _buildThemeNightDashboard();  // 2번: 나이트
+                          return _buildThemeEcoDashboard();                     // 3번: 에코
                         },
                       ),
               ),
@@ -818,7 +818,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Widget _buildHeader() {
-    List<String> themeNames = ["테마 B (세로)", "테마 C (나이트)", "테마 D (에코)"];
+    List<String> themeNames = ["세로", "나이트", "에코"];
 
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -1001,9 +1001,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   // =========================================================================
-  // [테마 B: 운전자 집중 세로형 레이아웃]
+  // [1. 세로 테마: 운전자 집중 세로형 메인 레이아웃]
   // =========================================================================
-  Widget _buildThemeBDriverDashboard() {
+  Widget _buildThemeDriverDashboard() {
     return Row(
       children: [
         Expanded(flex: 38, child: _buildVerticalPowerMeter()),
@@ -1251,9 +1251,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   // =========================================================================
-  // [테마 C: 나이트 드라이브 다크 모드]
+  // [2. 나이트 테마: 다크 앰버 모드]
   // =========================================================================
-  Widget _buildThemeCNightDashboard() {
+  Widget _buildThemeNightDashboard() {
     return Container(
       decoration: BoxDecoration(color: Colors.black, borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.amber.withOpacity(0.3), width: 1.2)),
       padding: const EdgeInsets.all(16),
@@ -1318,9 +1318,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   // =========================================================================
-  // [테마 D: 에코 챌린지 마스터 모드]
+  // [3. 에코 테마: 에코 챌린지 모드]
   // =========================================================================
-  Widget _buildThemeDEcoDashboard() {
+  Widget _buildThemeEcoDashboard() {
     double gainedKm = _accumulatedRegenKwh * _pureDriveTripEfficiency;
     Map<String, int> dist = _calculateEnergyDistribution();
 
@@ -1563,15 +1563,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
     double avgLoadPct = _loadSampleCount > 0 ? (_accumulatedLoadPct / _loadSampleCount) : 0.0;
     Map<String, dynamic> cellBal = _getCellBalanceStatus();
     Map<String, dynamic> loadGrade = _getLoadGrade(avgLoadPct);
-    bool isChargingOrRegen = _chargePowerKw > 0.1;
-    bool isFastCharge = _chargePowerKw > 10.0;
-    String chargeLabel = isChargingOrRegen ? (isFastCharge ? "⚡ 급속 충전 중" : "🔌 완속 충전 중") : "⚡ 실시간 충전/회생";
 
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
         Expanded(
-          flex: 32,
+          flex: 50,
           child: _buildExtendedCard(
             title: "⚡ 이번주행 평균 부하율",
             child: Row(
@@ -1580,31 +1577,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 Text("${avgLoadPct.toStringAsFixed(1)}", style: TextStyle(color: loadGrade['color'] as Color, fontSize: 16, fontWeight: FontWeight.bold)),
                 const Text(" %", style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
                 const SizedBox(width: 6),
-                Container(padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2), decoration: BoxDecoration(color: (loadGrade['color'] as Color).withOpacity(0.2), borderRadius: BorderRadius.circular(4), border: Border.all(color: loadGrade['color'] as Color, width: 0.8)), child: Text("${loadGrade['text']}", style: TextStyle(color: loadGrade['color'] as Color, fontSize: 11, fontWeight: FontWeight.bold))),
+                Container(padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2), decoration: BoxDecoration(color: (loadGrade['color'] as Color).withOpacity(0.2), borderRadius: BorderRadius.circular(4), border: Border.all(color: loadGrade['color'] as Color, width: 0.8)), child: Text("${loadGrade['text']}", style: TextStyle(color: loadGrade['color'] as Color, fontSize: 11, fontWeight: FontWeight.bold))),
               ],
             ),
           ),
         ),
         const SizedBox(width: 6),
         Expanded(
-          flex: 38,
-          child: _buildExtendedCard(
-            title: chargeLabel,
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text("${_chargePowerKw.toStringAsFixed(1)} kW", style: TextStyle(color: isChargingOrRegen ? const Color(0xFFFFB300) : Colors.white70, fontSize: 16, fontWeight: FontWeight.bold)),
-                const SizedBox(width: 8),
-                Container(padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1), decoration: BoxDecoration(color: const Color(0xFF00E5FF).withOpacity(0.15), borderRadius: BorderRadius.circular(4), border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.4))), child: Text("80% ${_calculateTimeToSoc(80.0)}", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 11, fontWeight: FontWeight.bold))),
-                const SizedBox(width: 4),
-                Container(padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1), decoration: BoxDecoration(color: const Color(0xFF00E676).withOpacity(0.15), borderRadius: BorderRadius.circular(4), border: Border.all(color: const Color(0xFF00E676).withOpacity(0.4))), child: Text("100% ${_calculateTimeToSoc(100.0)}", style: const TextStyle(color: Color(0xFF00E676), fontSize: 11, fontWeight: FontWeight.bold))),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(width: 6),
-        Expanded(
-          flex: 30,
+          flex: 50,
           child: _buildExtendedCard(
             title: "⚖️ 셀 밸런싱 편차 (ΔV)",
             child: Row(
@@ -1612,7 +1592,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               children: [
                 Text("$_cellDeltaMv", style: TextStyle(color: cellBal['color'] as Color, fontSize: 16, fontWeight: FontWeight.bold)),
                 const Text(" mV ", style: TextStyle(color: Colors.white70, fontSize: 12)),
-                Container(padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2), decoration: BoxDecoration(color: (cellBal['color'] as Color).withOpacity(0.2), borderRadius: BorderRadius.circular(4), border: Border.all(color: cellBal['color'] as Color, width: 0.8)), child: Text("${cellBal['status']}", style: TextStyle(color: cellBal['color'] as Color, fontSize: 11, fontWeight: FontWeight.bold))),
+                Container(padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2), decoration: BoxDecoration(color: (cellBal['color'] as Color).withOpacity(0.2), borderRadius: BorderRadius.circular(4), border: Border.all(color: cellBal['color'] as Color, width: 0.8)), child: Text("${cellBal['status']}", style: TextStyle(color: cellBal['color'] as Color, fontSize: 11, fontWeight: FontWeight.bold))),
               ],
             ),
           ),
