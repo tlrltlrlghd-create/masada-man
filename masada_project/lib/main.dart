@@ -76,6 +76,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   String _currentGear = "D";
   int _neutralDurationSeconds = 0;
 
+  // 실시간 악셀 & 공조 3종 온도 데이터
   int _accelPedalPct = 0;
   double _ptcTemp = 20.0;
   double _evapTemp = 15.0;
@@ -91,6 +92,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   double _energyAcKwh = 0.0;
   double _energyStandbyKwh = 0.0;
 
+  // 배터리 평생 실측 이력 데이터
   double _totalCumulativeChargeKwh = 0.0;
   int _chargeTimesCount = 0;
   int _dischargeTimesCount = 0;
@@ -268,10 +270,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return bytes;
   }
 
+  // =========================================================================
+  // [CAN 메시지 디스패처] (정상본과 100% 동일하게 복구)
+  // =========================================================================
   bool _dispatchCanMessage(int id, List<int> d) {
     if (d.length < 8) return false;
 
-    // 1. BMS_VCU_0 (0x0CFF7D03)
+    // 1. BMS_VCU_0 (0x0CFF7D03)[span_2](start_span)[span_2](end_span)[span_3](start_span)[span_3](end_span)
     if (id == 0x0CFF7D03) {
       int rawSoc = d[1];
       if (rawSoc > 0 && rawSoc <= 200) {
@@ -288,7 +293,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 2. BMS_VCU_1 (0x0CFF7E03)
+    // 2. BMS_VCU_1 (0x0CFF7E03)[span_4](start_span)[span_4](end_span)[span_5](start_span)[span_5](end_span)
     if (id == 0x0CFF7E03) {
       int rawSoh = d[1];
       if (rawSoh >= 50 && rawSoh <= 100) _soh = rawSoh;
@@ -322,7 +327,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 3. BMS_VCU_2 (0x0CFF7F03): 절연저항
+    // 3. BMS_VCU_2 (0x0CFF7F03): 절연저항[span_6](start_span)[span_6](end_span)[span_7](start_span)[span_7](end_span)
     if (id == 0x0CFF7F03) {
       int rawIso = (d[7] << 8) | d[6];
       if (rawIso > 0) _insulationResistanceKohm = rawIso * 10;
@@ -330,7 +335,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 4. VCU_Meter (0x19014801 / 0x18FF50E5 / 0x18FFDC01 / 0x09014801) - 완벽 검증 규격 복구[span_2](start_span)[span_2](end_span)[span_3](start_span)[span_3](end_span)
+    // 4. VCU_Meter (0x19014801 / 0x18FF50E5 / 0x18FFDC01 / 0x09014801)[span_8](start_span)[span_8](end_span)[span_9](start_span)[span_9](end_span)
     if (id == 0x19014801 || id == 0x18FF50E5 || id == 0x18FFDC01 || id == 0x09014801) {
       int rawGear = (d[4] >> 2) & 0x03;
       if (rawGear == 0) _currentGear = "N";
@@ -368,7 +373,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 5. Meter_VCU_1 (0x190048D5 / 0x18FEDCD5 / 0x090048D5) -> 차속[span_4](start_span)[span_4](end_span)
+    // 5. Meter_VCU_1 (0x190048D5 / 0x18FEDCD5 / 0x090048D5) -> 차속[span_10](start_span)[span_10](end_span)[span_11](start_span)[span_11](end_span)
     if (id == 0x190048D5 || id == 0x18FEDCD5 || id == 0x090048D5) {
       double rawSpd = d[0].toDouble();
       _realVehicleSpeedKmh = (rawSpd > 140.0) ? rawSpd * 0.5 : rawSpd;
@@ -376,7 +381,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 6. BMS_VCU_4 (0x0CFF8103): 수분센서 & 스위치[span_5](start_span)[span_5](end_span)
+    // 6. BMS_VCU_4 (0x0CFF8103): 수분센서 & 스위치[span_12](start_span)[span_12](end_span)[span_13](start_span)[span_13](end_span)
     if (id == 0x0CFF8103) {
       _isWaterAlarm = (d[6] & 0x01) != 0;
       _isDcSwitchClosed = (d[6] & 0x04) != 0;
@@ -385,7 +390,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 7. BMS_VCU_3 (0x0CFF8003): 완충 횟수 및 과방전 횟수[span_6](start_span)[span_6](end_span)
+    // 7. BMS_VCU_3 (0x0CFF8003): 완충 횟수 및 과방전 횟수[span_14](start_span)[span_14](end_span)[span_15](start_span)[span_15](end_span)
     if (id == 0x0CFF8003) {
       _chargeTimesCount = (d[3] << 8) | d[2];
       _dischargeTimesCount = (d[5] << 8) | d[4];
@@ -393,7 +398,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 8. BMS_VCU_7_1 (0x0CFF8503): 평생 누적 충전량[span_7](start_span)[span_7](end_span)
+    // 8. BMS_VCU_7_1 (0x0CFF8503): 평생 누적 충전량[span_16](start_span)[span_16](end_span)[span_17](start_span)[span_17](end_span)
     if (id == 0x0CFF8503 || id == 0x0CFF8501) {
       int rawCumul = (d[5] << 24) | (d[4] << 16) | (d[3] << 8) | d[2];
       if (rawCumul > 0) {
@@ -1636,7 +1641,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   // =========================================================================
-  // [캠핑 모드 대시보드] (좌측 95px 초대형 배터리 바 & 우측 4개 카드 완벽 균형)
+  // [캠핑 모드 대시보드] (좌측 배터리 폭 95px 3배 확대 & 우측 세부 4개 카드 2배 초대형화)
   // =========================================================================
   Widget _buildCampingDashboard() {
     bool isCharging = _chargePowerKw > 0.3;
@@ -1651,19 +1656,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
     String avail0Kwh = (_soc * _batteryTotalKwh / 100).toStringAsFixed(1);
 
     return Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         // [좌측 영역: 가로 폭 3배(95px) 배터리 바 + 잔량 & 전력 꽉 채움]
         Expanded(
-          flex: 45,
+          flex: 44,
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
               color: const Color(0xFF13171D),
               borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: const Color(0xFFFFB300).withOpacity(0.5), width: 1.2),
+              border: Border.all(color: const Color(0xFFFFB300).withOpacity(0.6), width: 1.2),
             ),
             child: Column(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -1672,12 +1677,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       children: [
                         Icon(Icons.battery_charging_full, color: Color(0xFF00E676), size: 22),
                         SizedBox(width: 6),
-                        Text("배터리 잔량", style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                        Text("배터리 잔량", style: TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.bold)),
                       ],
                     ),
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                      decoration: BoxDecoration(color: const Color(0xFFFFB300).withOpacity(0.2), borderRadius: BorderRadius.circular(6)),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFFB300).withOpacity(0.2),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
                       child: Text(
                         isCharging ? "충전 진행 중" : "무시동 방전 중",
                         style: const TextStyle(color: Color(0xFFFFB300), fontSize: 12, fontWeight: FontWeight.bold),
@@ -1685,97 +1693,105 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     ),
                   ],
                 ),
+                const SizedBox(height: 4),
+
+                // 중앙 배터리 게이지 & 수치 (Expanded로 수직 여백 꽉 채움)
                 Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 6.0),
-                    child: Row(
-                      children: [
-                        // 가로 폭 95px의 두터운 세로형 배터리 바
-                        Container(
-                          width: 95,
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF1E242C),
-                            borderRadius: BorderRadius.circular(14),
-                            border: Border.all(color: Colors.white24, width: 1.5),
-                          ),
-                          clipBehavior: Clip.antiAlias,
-                          child: LayoutBuilder(
-                            builder: (context, constraints) {
-                              double fillHeight = constraints.maxHeight * (_soc / 100.0).clamp(0.0, 1.0);
-                              return Align(
-                                alignment: Alignment.bottomCenter,
-                                child: Container(
-                                  width: 95,
-                                  height: fillHeight,
-                                  decoration: BoxDecoration(
-                                    gradient: LinearGradient(
-                                      colors: _soc <= 20
-                                          ? [const Color(0xFFFF5252), const Color(0xFFFF9100)]
-                                          : [const Color(0xFF00E5FF), const Color(0xFF00E676)],
-                                      begin: Alignment.bottomCenter,
-                                      end: Alignment.topCenter,
-                                    ),
+                  child: Row(
+                    children: [
+                      // 가로 폭 95px의 두터운 세로형 배터리 바 (3배 확대)
+                      Container(
+                        width: 95,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF1E242C),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: Colors.white30, width: 1.5),
+                        ),
+                        clipBehavior: Clip.antiAlias,
+                        child: LayoutBuilder(
+                          builder: (context, constraints) {
+                            double fillHeight = constraints.maxHeight * (_soc / 100.0).clamp(0.0, 1.0);
+                            return Align(
+                              alignment: Alignment.bottomCenter,
+                              child: Container(
+                                width: 95,
+                                height: fillHeight,
+                                decoration: BoxDecoration(
+                                  gradient: LinearGradient(
+                                    colors: _soc <= 20
+                                        ? [const Color(0xFFFF5252), const Color(0xFFFF9100)]
+                                        : [const Color(0xFF00E5FF), const Color(0xFF00E676)],
+                                    begin: Alignment.bottomCenter,
+                                    end: Alignment.topCenter,
                                   ),
                                 ),
-                              );
-                            },
-                          ),
+                              ),
+                            );
+                          },
                         ),
-                        const SizedBox(width: 14),
-                        // 배터리 잔량 % 및 실시간 전력 소모 수치
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Row(
-                                crossAxisAlignment: CrossAxisAlignment.baseline,
-                                textBaseline: TextBaseline.alphabetic,
-                                children: [
-                                  Text(
-                                    _soc.toStringAsFixed(1),
-                                    style: const TextStyle(
-                                      color: Color(0xFF00E676),
-                                      fontSize: 60,
-                                      fontWeight: FontWeight.w900,
-                                      letterSpacing: -2.0,
+                      ),
+                      const SizedBox(width: 14),
+
+                      // 잔량 퍼센트 & 전력 현황
+                      Expanded(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.baseline,
+                              textBaseline: TextBaseline.alphabetic,
+                              children: [
+                                Text(
+                                  _soc.toStringAsFixed(1),
+                                  style: const TextStyle(
+                                    color: Color(0xFF00E676),
+                                    fontSize: 68,
+                                    fontWeight: FontWeight.w900,
+                                    letterSpacing: -2.5,
+                                    height: 1.0,
+                                  ),
+                                ),
+                                const SizedBox(width: 2),
+                                const Text("%", style: TextStyle(color: Color(0xFF00E676), fontSize: 26, fontWeight: FontWeight.bold)),
+                              ],
+                            ),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(isCharging ? "실시간 충전" : "실시간 소모", style: const TextStyle(color: Colors.white60, fontSize: 12)),
+                                    Text(
+                                      isCharging ? "${_chargePowerKw.toStringAsFixed(1)} kW" : "${liveWatts.toStringAsFixed(0)} W",
+                                      style: const TextStyle(color: Color(0xFFFFB300), fontSize: 22, fontWeight: FontWeight.w900),
                                     ),
-                                  ),
-                                  const SizedBox(width: 4),
-                                  const Text("%", style: TextStyle(color: Color(0xFF00E676), fontSize: 24, fontWeight: FontWeight.bold)),
-                                ],
-                              ),
-                              const SizedBox(height: 6),
-                              Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                children: [
-                                  Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      Text(isCharging ? "실시간 충전 전력" : "실시간 소모 전력", style: const TextStyle(color: Colors.white60, fontSize: 12)),
-                                      const SizedBox(height: 2),
-                                      Text(isCharging ? "${_chargePowerKw.toStringAsFixed(1)} kW" : "${liveWatts.toStringAsFixed(0)} W", style: const TextStyle(color: Color(0xFFFFB300), fontSize: 20, fontWeight: FontWeight.w900)),
-                                    ],
-                                  ),
-                                  Column(
-                                    crossAxisAlignment: CrossAxisAlignment.end,
-                                    children: [
-                                      Text(isCharging ? "시간당 충전율" : "시간당 소모율", style: const TextStyle(color: Colors.white60, fontSize: 12)),
-                                      const SizedBox(height: 2),
-                                      Text("${percentPerHour.toStringAsFixed(1)} %/h", style: const TextStyle(color: Colors.cyanAccent, fontSize: 20, fontWeight: FontWeight.w900)),
-                                    ],
-                                  ),
-                                ],
-                              ),
-                            ],
-                          ),
+                                  ],
+                                ),
+                                Column(
+                                  crossAxisAlignment: CrossAxisAlignment.end,
+                                  children: [
+                                    Text(isCharging ? "시간당 충전율" : "시간당 소모율", style: const TextStyle(color: Colors.white60, fontSize: 12)),
+                                    Text(
+                                      "${percentPerHour.toStringAsFixed(1)} %/h",
+                                      style: const TextStyle(color: Colors.cyanAccent, fontSize: 22, fontWeight: FontWeight.w900),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ],
                         ),
-                      ],
-                    ),
+                      ),
+                    ],
                   ),
                 ),
+                const SizedBox(height: 6),
+
+                // 하단 공조 3종 온도 바
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                   decoration: BoxDecoration(
                     color: const Color(0xFF1A212B),
                     borderRadius: BorderRadius.circular(10),
@@ -1784,11 +1800,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceAround,
                     children: [
-                      _buildCampingTempItem(title: "🌡️ 외기온도", valueText: "${_envTemp.toStringAsFixed(1)}°C", valueColor: Colors.orangeAccent),
-                      Container(width: 1, height: 26, color: Colors.white24),
+                      _buildCampingTempItem(title: "🌡️ 외기", valueText: "${_envTemp.toStringAsFixed(1)}°C", valueColor: Colors.orangeAccent),
+                      Container(width: 1, height: 24, color: Colors.white24),
                       _buildCampingTempItem(title: "❄️ 에어컨", valueText: "${_evapTemp.toStringAsFixed(1)}°C", valueColor: const Color(0xFF00E5FF)),
-                      Container(width: 1, height: 26, color: Colors.white24),
-                      _buildCampingTempItem(title: "🔥 히터 PTC", valueText: "${_ptcTemp.toStringAsFixed(1)}°C", valueColor: Colors.redAccent),
+                      Container(width: 1, height: 24, color: Colors.white24),
+                      _buildCampingTempItem(title: "🔥 히터", valueText: "${_ptcTemp.toStringAsFixed(1)}°C", valueColor: Colors.redAccent),
                     ],
                   ),
                 ),
@@ -1796,145 +1812,169 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ),
           ),
         ),
-        const SizedBox(width: 8),
-        // [우측 영역: 세부 카드 4종]
+        const SizedBox(width: 6),
+
+        // [우측 영역: 상하 2단 및 내부 4개 세부 카드 세로폭 2배 극대화]
         Expanded(
-          flex: 55,
+          flex: 56,
           child: Column(
             children: [
+              // 1. 무시동 공조 가용 시간 카드
               Expanded(
-                flex: 50,
                 child: Container(
                   width: double.infinity,
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
                     color: const Color(0xFF13171D),
-                    borderRadius: BorderRadius.circular(16),
+                    borderRadius: BorderRadius.circular(14),
                     border: Border.all(color: const Color(0xFF222A35)),
                   ),
                   child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       const Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          Text("🏕️ 무시동 공조 가용 시간 (배터리 한계 마진)", style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold)),
+                          Text("🏕️ 무시동 공조 가용 시간", style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold)),
                           Text("실시간 소모율 반영", style: TextStyle(color: Colors.white38, fontSize: 11)),
                         ],
                       ),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF1E242C),
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.4), width: 1.2),
-                              ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  const Text("🛡️ 복귀 마진 (20% 도달)", style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
-                                  const SizedBox(height: 4),
-                                  Text(margin20Time, style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 26, fontWeight: FontWeight.w900)),
-                                  Text("가용량: $avail20Kwh kWh", style: const TextStyle(color: Colors.white54, fontSize: 12)),
-                                ],
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF1E242C),
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(color: const Color(0xFFFF5252).withOpacity(0.4), width: 1.2),
-                              ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  const Text("⚠️ 한계 마진 (0% 방전)", style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
-                                  const SizedBox(height: 4),
-                                  Text(margin0Time, style: const TextStyle(color: Color(0xFFFF5252), fontSize: 26, fontWeight: FontWeight.w900)),
-                                  Text("잔여량: $avail0Kwh kWh", style: const TextStyle(color: Colors.white54, fontSize: 12)),
-                                ],
+                      const SizedBox(height: 6),
+                      Expanded(
+                        child: Row(
+                          children: [
+                            // 복귀 마진 (20%)
+                            Expanded(
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF1E242C),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.5), width: 1.2),
+                                ),
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Text("🛡️ 복귀 마진 (20% 도달)", style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
+                                    Text(
+                                      margin20Time,
+                                      style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 38, fontWeight: FontWeight.w900, letterSpacing: -1.5, height: 1.0),
+                                    ),
+                                    Text("가용량: $avail20Kwh kWh", style: const TextStyle(color: Colors.white60, fontSize: 13, fontWeight: FontWeight.w500)),
+                                  ],
+                                ),
                               ),
                             ),
-                          ),
-                        ],
+                            const SizedBox(width: 6),
+
+                            // 한계 마진 (0%)
+                            Expanded(
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF1E242C),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(color: const Color(0xFFFF5252).withOpacity(0.5), width: 1.2),
+                                ),
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Text("⚠️ 한계 마진 (0% 방전)", style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
+                                    Text(
+                                      margin0Time,
+                                      style: const TextStyle(color: Color(0xFFFF5252), fontSize: 38, fontWeight: FontWeight.w900, letterSpacing: -1.5, height: 1.0),
+                                    ),
+                                    Text("잔여량: $avail0Kwh kWh", style: const TextStyle(color: Colors.white60, fontSize: 13, fontWeight: FontWeight.w500)),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ],
                   ),
                 ),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 6),
+
+              // 2. 실시간 충전 대기 카드
               Expanded(
-                flex: 50,
                 child: Container(
                   width: double.infinity,
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
                     color: const Color(0xFF13171D),
-                    borderRadius: BorderRadius.circular(16),
+                    borderRadius: BorderRadius.circular(14),
                     border: Border.all(color: isCharging ? const Color(0xFF00E5FF).withOpacity(0.6) : const Color(0xFF222A35)),
                   ),
                   child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
                           Text(
                             isCharging ? (isFastCharge ? "⚡ 급속 충전 진행 중" : "🔌 완속 충전 진행 중") : "⚡ 실시간 충전 대기",
-                            style: TextStyle(color: isCharging ? const Color(0xFFFFB300) : Colors.white, fontSize: 14, fontWeight: FontWeight.bold),
+                            style: TextStyle(color: isCharging ? const Color(0xFFFFB300) : Colors.white, fontSize: 15, fontWeight: FontWeight.bold),
                           ),
-                          Text("${_chargePowerKw.toStringAsFixed(1)} kW", style: TextStyle(color: isCharging ? const Color(0xFFFFB300) : Colors.white54, fontSize: 18, fontWeight: FontWeight.w900)),
+                          Text("${_chargePowerKw.toStringAsFixed(1)} kW", style: TextStyle(color: isCharging ? const Color(0xFFFFB300) : Colors.white54, fontSize: 20, fontWeight: FontWeight.w900)),
                         ],
                       ),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF1E242C),
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.3)),
-                              ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  const Text("80% 목표 도달", style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
-                                  const SizedBox(height: 4),
-                                  Text(_calculateTimeToSoc(80.0), style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 24, fontWeight: FontWeight.w900)),
-                                ],
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF1E242C),
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(color: const Color(0xFF00E676).withOpacity(0.3)),
-                              ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  const Text("100% 완전 충전", style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
-                                  const SizedBox(height: 4),
-                                  Text(_calculateTimeToSoc(100.0), style: const TextStyle(color: Color(0xFF00E676), fontSize: 24, fontWeight: FontWeight.w900)),
-                                ],
+                      const SizedBox(height: 6),
+                      Expanded(
+                        child: Row(
+                          children: [
+                            // 80% 목표
+                            Expanded(
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF1E242C),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.4)),
+                                ),
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Text("80% 목표 도달", style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
+                                    Text(
+                                      _calculateTimeToSoc(80.0),
+                                      style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 34, fontWeight: FontWeight.w900, letterSpacing: -1.0, height: 1.0),
+                                    ),
+                                    const Text("배터리 보호 구간", style: TextStyle(color: Colors.white38, fontSize: 12)),
+                                  ],
+                                ),
                               ),
                             ),
-                          ),
-                        ],
+                            const SizedBox(width: 6),
+
+                            // 100% 완충
+                            Expanded(
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF1E242C),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(color: const Color(0xFF00E676).withOpacity(0.4)),
+                                ),
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Text("100% 완전 충전", style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
+                                    Text(
+                                      _calculateTimeToSoc(100.0),
+                                      style: const TextStyle(color: Color(0xFF00E676), fontSize: 34, fontWeight: FontWeight.w900, letterSpacing: -1.0, height: 1.0),
+                                    ),
+                                    const Text("완전 충전 완료 예상", style: TextStyle(color: Colors.white38, fontSize: 12)),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ],
                   ),
@@ -1951,9 +1991,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text(title, style: const TextStyle(color: Colors.white60, fontSize: 12)),
+        Text(title, style: const TextStyle(color: Colors.white60, fontSize: 11)),
         const SizedBox(height: 2),
-        Text(valueText, style: TextStyle(color: valueColor, fontSize: 16, fontWeight: FontWeight.bold)),
+        Text(valueText, style: TextStyle(color: valueColor, fontSize: 15, fontWeight: FontWeight.bold)),
       ],
     );
   }
