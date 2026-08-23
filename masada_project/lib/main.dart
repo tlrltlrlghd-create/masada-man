@@ -271,7 +271,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   bool _dispatchCanMessage(int id, List<int> d) {
     if (d.length < 8) return false;
 
-    // 1. BMS SOC & 최고/최저 셀 전압
+    // 1. BMS SOC & 최고/최저 셀 전압[span_3](start_span)[span_3](end_span)[span_4](start_span)[span_4](end_span)
     if (id == 0x0CFF7D03) {
       int rawSoc = d[1];
       if (rawSoc > 0 && rawSoc <= 200) {
@@ -288,7 +288,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 2. SOH, 전압, 전류, 배터리 온도
+    // 2. SOH, 전압, 전류, 배터리 온도[span_5](start_span)[span_5](end_span)[span_6](start_span)[span_6](end_span)
     if (id == 0x0CFF7E03) {
       int rawSoh = d[1];
       if (rawSoh >= 50 && rawSoh <= 100) _soh = rawSoh;
@@ -322,7 +322,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 3. 절연 저항
+    // 3. 절연 저항[span_7](start_span)[span_7](end_span)[span_8](start_span)[span_8](end_span)
     if (id == 0x0CFF7F03) {
       int rawIso = (d[7] << 8) | d[6];
       if (rawIso > 0) _insulationResistanceKohm = rawIso * 10;
@@ -330,7 +330,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 4. 공조 3종 온도 & 악셀/기어 (0x19014801 VCU_Meter 전용 파싱)
+    // 4. 공조 3종 온도 & 악셀/기어 (0x19014801 VCU_Meter 전용 파싱)[span_9](start_span)[span_9](end_span)
     if (id == 0x19014801 || id == 0x09014801) {
       int rawGear = (d[4] >> 2) & 0x03;
       if (rawGear == 0) _currentGear = "N";
@@ -349,18 +349,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
       _isFootBrakePressed = (d[4] & 0x01) != 0;
 
+      // 공조 3종 온도 (CAN DB 정밀 규격: Raw - 50)[span_10](start_span)[span_10](end_span)
       int rawEnv = d[5];
-      if (rawEnv >= 0 && rawEnv <= 255) {
+      if (rawEnv > 0 && rawEnv <= 255) {
         _envTemp = (rawEnv - 50).toDouble();
       }
 
       int rawEvap = d[6];
-      if (rawEvap >= 0 && rawEvap <= 255) {
+      if (rawEvap > 0 && rawEvap <= 255) {
         _evapTemp = (rawEvap - 50).toDouble();
       }
 
       int rawPtc = d[7];
-      if (rawPtc >= 0 && rawPtc <= 255) {
+      if (rawPtc > 0 && rawPtc <= 255) {
         _ptcTemp = (rawPtc - 50).toDouble();
       }
 
@@ -368,7 +369,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 5. 별도 가속/기어 메시지
+    // 5. 별도 가속/기어 메시지[span_11](start_span)[span_11](end_span)
     if (id == 0x18FFDC01) {
       if (d[3] >= 0 && d[3] <= 100) {
         _accelPedalPct = d[3];
@@ -384,7 +385,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 6. 실시간 차량 속도
+    // 6. 실시간 차량 속도[span_12](start_span)[span_12](end_span)[span_13](start_span)[span_13](end_span)
     if (id == 0x190048D5 || id == 0x18FEDCD5 || id == 0x090048D5) {
       double rawSpd = d[0].toDouble();
       _realVehicleSpeedKmh = (rawSpd > 140.0) ? rawSpd * 0.5 : rawSpd;
@@ -392,7 +393,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 7. 배터리 기밀/스위치/수분
+    // 7. 배터리 기밀/스위치/수분[span_14](start_span)[span_14](end_span)[span_15](start_span)[span_15](end_span)
     if (id == 0x0CFF8103) {
       _isWaterAlarm = (d[6] & 0x01) != 0;
       _isDcSwitchClosed = (d[6] & 0x04) != 0;
@@ -401,7 +402,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 8. 충/방전 횟수
+    // 8. 충/방전 횟수[span_16](start_span)[span_16](end_span)[span_17](start_span)[span_17](end_span)
     if (id == 0x0CFF8003) {
       _chargeTimesCount = (d[3] << 8) | d[2];
       _dischargeTimesCount = (d[5] << 8) | d[4];
@@ -409,7 +410,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 9. 평생 누적 충전량
+    // 9. 평생 누적 충전량[span_18](start_span)[span_18](end_span)[span_19](start_span)[span_19](end_span)
     if (id == 0x0CFF8503 || id == 0x0CFF8501) {
       int rawCumul = (d[5] << 24) | (d[4] << 16) | (d[3] << 8) | d[2];
       if (rawCumul > 0) {
@@ -1142,7 +1143,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  // [우측] 주행 효율 점수 & 에너지 소비처 4분할 바 (글자/숫자 크기 대폭 확대)
   Widget _buildEfficiencyEnergyCard() {
     Color effThemeColor = _getEfficiencyColor(_efficiencyScore);
     Map<String, int> dist = _calculateEnergyDistribution();
@@ -1253,7 +1253,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   // =========================================================================
-  // [2페이지] 배터리 정밀 진단 센터
+  // [2페이지] 배터리 정밀 진단 센터 (게이지 삭제 완료)
   // =========================================================================
   Widget _buildBatteryDiagnosticsPage() {
     Map<String, dynamic> cellBal = _getCellBalanceStatus();
@@ -1264,7 +1264,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         Expanded(
           flex: 33,
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
             decoration: BoxDecoration(
               color: const Color(0xFF13171D),
               borderRadius: BorderRadius.circular(16),
@@ -1308,35 +1308,34 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     ),
                   ],
                 ),
-                const Divider(color: Colors.white10, height: 8),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        const Text("평생 총 누적 충전", style: TextStyle(color: Colors.white70, fontSize: 14, fontWeight: FontWeight.bold)),
-                        Text("${_totalCumulativeChargeKwh.toStringAsFixed(1)} kWh", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 17, fontWeight: FontWeight.w900)),
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    _buildSimpleHorizontalGauge(
-                      ratio: (_totalCumulativeChargeKwh / 20000.0).clamp(0.0, 1.0),
-                      activeColor: const Color(0xFF00E5FF),
-                    ),
-                  ],
+                const Divider(color: Colors.white10, height: 12),
+                // 게이지 바 없이 크고 시원한 텍스트로만 구성
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1A212B),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text("평생 총 누적 충전", style: TextStyle(color: Colors.white70, fontSize: 14, fontWeight: FontWeight.bold)),
+                      Text("${_totalCumulativeChargeKwh.toStringAsFixed(1)} kWh", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 19, fontWeight: FontWeight.w900)),
+                    ],
+                  ),
                 ),
                 Row(
                   children: [
                     Expanded(
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                         decoration: BoxDecoration(color: const Color(0xFF1A212B), borderRadius: BorderRadius.circular(8)),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            const Text("평생 완충 횟수", style: TextStyle(color: Colors.white54, fontSize: 11)),
-                            Text("$_chargeTimesCount 회", style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                            const Text("평생 완충 횟수", style: TextStyle(color: Colors.white54, fontSize: 12)),
+                            const SizedBox(height: 2),
+                            Text("$_chargeTimesCount 회", style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
                           ],
                         ),
                       ),
@@ -1344,13 +1343,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     const SizedBox(width: 8),
                     Expanded(
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                         decoration: BoxDecoration(color: const Color(0xFF1A212B), borderRadius: BorderRadius.circular(8)),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            const Text("과방전 차단", style: TextStyle(color: Colors.white54, fontSize: 11)),
-                            Text("$_dischargeTimesCount 회", style: TextStyle(color: _dischargeTimesCount > 0 ? const Color(0xFFFF5252) : const Color(0xFF00E676), fontSize: 16, fontWeight: FontWeight.bold)),
+                            const Text("과방전 차단", style: TextStyle(color: Colors.white54, fontSize: 12)),
+                            const SizedBox(height: 2),
+                            Text("$_dischargeTimesCount 회", style: TextStyle(color: _dischargeTimesCount > 0 ? const Color(0xFFFF5252) : const Color(0xFF00E676), fontSize: 18, fontWeight: FontWeight.bold)),
                           ],
                         ),
                       ),
@@ -1365,7 +1365,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         Expanded(
           flex: 33,
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
             decoration: BoxDecoration(
               color: const Color(0xFF13171D),
               borderRadius: BorderRadius.circular(16),
@@ -1407,16 +1407,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     ),
                   ],
                 ),
-                const Divider(color: Colors.white10, height: 8),
+                const Divider(color: Colors.white10, height: 10),
                 Container(
-                  padding: const EdgeInsets.all(10),
+                  padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(color: const Color(0xFF1A212B), borderRadius: BorderRadius.circular(10)),
                   child: Column(
                     children: [
                       _buildBigStatusRow("메인 안전 스위치(DC)", _isDcSwitchClosed ? "정상 체결 (LOCK)" : "개방 주의", _isDcSwitchClosed ? const Color(0xFF00E676) : const Color(0xFFFF5252)),
-                      const Divider(color: Colors.white10, height: 10),
+                      const Divider(color: Colors.white10, height: 12),
                       _buildBigStatusRow("배터리 팩 커버 밀폐", _isPackCoverClosed ? "정상 밀폐 (OK)" : "점검 필요", _isPackCoverClosed ? const Color(0xFF00E676) : const Color(0xFFFF5252)),
-                      const Divider(color: Colors.white10, height: 10),
+                      const Divider(color: Colors.white10, height: 12),
                       _buildBigStatusRow("내부 침수/수분 센서", _isWaterAlarm ? "⚠️ 수분 감지 경고" : "정상 (건조)", _isWaterAlarm ? const Color(0xFFFF5252) : const Color(0xFF00E676)),
                     ],
                   ),
@@ -1429,7 +1429,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         Expanded(
           flex: 34,
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
             decoration: BoxDecoration(
               color: const Color(0xFF13171D),
               borderRadius: BorderRadius.circular(16),
@@ -1482,9 +1482,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     ),
                   ],
                 ),
-                const Divider(color: Colors.white10, height: 8),
+                const Divider(color: Colors.white10, height: 10),
                 Container(
-                  padding: const EdgeInsets.all(10),
+                  padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(color: const Color(0xFF1A212B), borderRadius: BorderRadius.circular(10)),
                   child: Column(
                     children: [
@@ -1492,7 +1492,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
                           const Text("최고 전압 셀", style: TextStyle(color: Colors.white70, fontSize: 13)),
-                          Text("#$_cellMaxId번 ($_cellMaxMv mV)", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 14, fontWeight: FontWeight.bold)),
+                          Text("#$_cellMaxId번 ($_cellMaxMv mV)", style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 15, fontWeight: FontWeight.bold)),
                         ],
                       ),
                       const SizedBox(height: 8),
@@ -1500,7 +1500,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
                           const Text("최저 전압 셀", style: TextStyle(color: Colors.white70, fontSize: 13)),
-                          Text("#$_cellMinId번 ($_cellMinMv mV)", style: const TextStyle(color: Color(0xFFFF9100), fontSize: 14, fontWeight: FontWeight.bold)),
+                          Text("#$_cellMinId번 ($_cellMinMv mV)", style: const TextStyle(color: Color(0xFFFF9100), fontSize: 15, fontWeight: FontWeight.bold)),
                         ],
                       ),
                     ],
@@ -1653,20 +1653,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  Widget _buildSimpleHorizontalGauge({required double ratio, required Color activeColor}) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(4),
-      child: LinearProgressIndicator(
-        value: ratio,
-        backgroundColor: Colors.white10,
-        valueColor: AlwaysStoppedAnimation<Color>(activeColor),
-        minHeight: 8,
-      ),
-    );
-  }
-
   // =========================================================================
-  // [캠핑 모드 대시보드]
+  // [캠핑 모드 대시보드] (초대형 폰트 & 46px 극대화 세로 배터리 바)
   // =========================================================================
   Widget _buildCampingDashboard() {
     bool isCharging = _chargePowerKw > 0.3;
@@ -1682,10 +1670,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     return Row(
       children: [
+        // 좌측: 초대형 46px 배터리 바 + 74px 잔량 폰트 + 공조 3종
         Expanded(
-          flex: 44,
+          flex: 45,
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
             decoration: BoxDecoration(
               color: const Color(0xFF13171D),
               borderRadius: BorderRadius.circular(16),
@@ -1699,32 +1688,33 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   children: [
                     const Row(
                       children: [
-                        Icon(Icons.battery_charging_full, color: Color(0xFF00E676), size: 22),
-                        SizedBox(width: 6),
-                        Text("현재 배터리 잔량", style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                        Icon(Icons.battery_charging_full, color: Color(0xFF00E676), size: 24),
+                        SizedBox(width: 8),
+                        Text("배터리 잔량", style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
                       ],
                     ),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                       decoration: BoxDecoration(color: const Color(0xFFFFB300).withOpacity(0.2), borderRadius: BorderRadius.circular(6)),
                       child: Text(
-                        isCharging ? "충전 중" : "무시동 방전 중",
-                        style: const TextStyle(color: Color(0xFFFFB300), fontSize: 12, fontWeight: FontWeight.bold),
+                        isCharging ? "충전 진행 중" : "무시동 방전 중",
+                        style: const TextStyle(color: Color(0xFFFFB300), fontSize: 13, fontWeight: FontWeight.bold),
                       ),
                     ),
                   ],
                 ),
                 Expanded(
                   child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 8.0),
+                    padding: const EdgeInsets.symmetric(vertical: 6.0),
                     child: Row(
                       children: [
+                        // 매우 두꺼운 46px 세로형 배터리 바
                         Container(
-                          width: 32,
+                          width: 46,
                           decoration: BoxDecoration(
                             color: const Color(0xFF1E242C),
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(color: Colors.white24, width: 1.2),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: Colors.white30, width: 1.5),
                           ),
                           clipBehavior: Clip.antiAlias,
                           child: LayoutBuilder(
@@ -1733,7 +1723,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               return Align(
                                 alignment: Alignment.bottomCenter,
                                 child: Container(
-                                  width: 32,
+                                  width: 46,
                                   height: fillHeight,
                                   decoration: BoxDecoration(
                                     gradient: LinearGradient(
@@ -1749,7 +1739,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             },
                           ),
                         ),
-                        const SizedBox(width: 14),
+                        const SizedBox(width: 16),
+                        // 74px 초대형 배터리 잔량 & 실시간 전력 소모
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1763,13 +1754,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                     _soc.toStringAsFixed(1),
                                     style: const TextStyle(
                                       color: Color(0xFF00E676),
-                                      fontSize: 62,
+                                      fontSize: 74,
                                       fontWeight: FontWeight.w900,
-                                      letterSpacing: -2.0,
+                                      letterSpacing: -3.0,
                                     ),
                                   ),
                                   const SizedBox(width: 4),
-                                  const Text("%", style: TextStyle(color: Color(0xFF00E676), fontSize: 26, fontWeight: FontWeight.bold)),
+                                  const Text("%", style: TextStyle(color: Color(0xFF00E676), fontSize: 28, fontWeight: FontWeight.bold)),
                                 ],
                               ),
                               const SizedBox(height: 6),
@@ -1779,17 +1770,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                   Column(
                                     crossAxisAlignment: CrossAxisAlignment.start,
                                     children: [
-                                      Text(isCharging ? "실시간 충전 전력" : "실시간 소모 전력", style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                                      Text(isCharging ? "실시간 충전 전력" : "실시간 소모 전력", style: const TextStyle(color: Colors.white60, fontSize: 13)),
                                       const SizedBox(height: 2),
-                                      Text(isCharging ? "${_chargePowerKw.toStringAsFixed(1)} kW" : "${liveWatts.toStringAsFixed(0)} W", style: const TextStyle(color: Color(0xFFFFB300), fontSize: 22, fontWeight: FontWeight.w900)),
+                                      Text(isCharging ? "${_chargePowerKw.toStringAsFixed(1)} kW" : "${liveWatts.toStringAsFixed(0)} W", style: const TextStyle(color: Color(0xFFFFB300), fontSize: 24, fontWeight: FontWeight.w900)),
                                     ],
                                   ),
                                   Column(
                                     crossAxisAlignment: CrossAxisAlignment.end,
                                     children: [
-                                      Text(isCharging ? "시간당 충전율" : "시간당 소모율", style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                                      Text(isCharging ? "시간당 충전율" : "시간당 소모율", style: const TextStyle(color: Colors.white60, fontSize: 13)),
                                       const SizedBox(height: 2),
-                                      Text("${percentPerHour.toStringAsFixed(1)} %/h", style: const TextStyle(color: Colors.cyanAccent, fontSize: 22, fontWeight: FontWeight.w900)),
+                                      Text("${percentPerHour.toStringAsFixed(1)} %/h", style: const TextStyle(color: Colors.cyanAccent, fontSize: 24, fontWeight: FontWeight.w900)),
                                     ],
                                   ),
                                 ],
@@ -1802,19 +1793,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   ),
                 ),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                   decoration: BoxDecoration(
                     color: const Color(0xFF1A212B),
-                    borderRadius: BorderRadius.circular(10),
+                    borderRadius: BorderRadius.circular(12),
                     border: Border.all(color: Colors.white12),
                   ),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceAround,
                     children: [
                       _buildCampingTempItem(title: "🌡️ 외기온도", valueText: "${_envTemp.toStringAsFixed(1)}°C", valueColor: Colors.orangeAccent),
-                      Container(width: 1, height: 26, color: Colors.white24),
+                      Container(width: 1, height: 28, color: Colors.white24),
                       _buildCampingTempItem(title: "❄️ 에어컨", valueText: "${_evapTemp.toStringAsFixed(1)}°C", valueColor: const Color(0xFF00E5FF)),
-                      Container(width: 1, height: 26, color: Colors.white24),
+                      Container(width: 1, height: 28, color: Colors.white24),
                       _buildCampingTempItem(title: "🔥 히터 PTC", valueText: "${_ptcTemp.toStringAsFixed(1)}°C", valueColor: Colors.redAccent),
                     ],
                   ),
@@ -1824,15 +1815,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ),
         const SizedBox(width: 8),
+        // 우측: 무시동 공조 가용 시간 & 실시간 충전 대기 (34px 초대형 폰트)
         Expanded(
-          flex: 56,
+          flex: 55,
           child: Column(
             children: [
               Expanded(
                 flex: 50,
                 child: Container(
                   width: double.infinity,
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
                   decoration: BoxDecoration(
                     color: const Color(0xFF13171D),
                     borderRadius: BorderRadius.circular(16),
@@ -1845,47 +1837,47 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       const Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          Text("🏕️ 무시동 공조 가용 시간 (배터리 한계 마진)", style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold)),
-                          Text("실시간 소모율 반영", style: TextStyle(color: Colors.white38, fontSize: 11)),
+                          Text("🏕️ 무시동 공조 가용 시간 (배터리 한계 마진)", style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                          Text("실시간 소모율 반영", style: TextStyle(color: Colors.white38, fontSize: 12)),
                         ],
                       ),
                       Row(
                         children: [
                           Expanded(
                             child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                               decoration: BoxDecoration(
                                 color: const Color(0xFF1E242C),
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.4), width: 1.2),
+                                borderRadius: BorderRadius.circular(14),
+                                border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.5), width: 1.2),
                               ),
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  const Text("🛡️ 복귀 마진 (20% 도달)", style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
+                                  const Text("🛡️ 복귀 마진 (20% 도달)", style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
                                   const SizedBox(height: 4),
-                                  Text(margin20Time, style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 26, fontWeight: FontWeight.w900)),
-                                  Text("가용량: $avail20Kwh kWh", style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                                  Text(margin20Time, style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 32, fontWeight: FontWeight.w900, letterSpacing: -1.0)),
+                                  Text("가용량: $avail20Kwh kWh", style: const TextStyle(color: Colors.white54, fontSize: 13)),
                                 ],
                               ),
                             ),
                           ),
-                          const SizedBox(width: 8),
+                          const SizedBox(width: 10),
                           Expanded(
                             child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                               decoration: BoxDecoration(
                                 color: const Color(0xFF1E242C),
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(color: const Color(0xFFFF5252).withOpacity(0.4), width: 1.2),
+                                borderRadius: BorderRadius.circular(14),
+                                border: Border.all(color: const Color(0xFFFF5252).withOpacity(0.5), width: 1.2),
                               ),
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  const Text("⚠️ 한계 마진 (0% 방전)", style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
+                                  const Text("⚠️ 한계 마진 (0% 방전)", style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
                                   const SizedBox(height: 4),
-                                  Text(margin0Time, style: const TextStyle(color: Color(0xFFFF5252), fontSize: 26, fontWeight: FontWeight.w900)),
-                                  Text("잔여량: $avail0Kwh kWh", style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                                  Text(margin0Time, style: const TextStyle(color: Color(0xFFFF5252), fontSize: 32, fontWeight: FontWeight.w900, letterSpacing: -1.0)),
+                                  Text("잔여량: $avail0Kwh kWh", style: const TextStyle(color: Colors.white54, fontSize: 13)),
                                 ],
                               ),
                             ),
@@ -1901,7 +1893,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 flex: 50,
                 child: Container(
                   width: double.infinity,
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
                   decoration: BoxDecoration(
                     color: const Color(0xFF13171D),
                     borderRadius: BorderRadius.circular(16),
@@ -1916,46 +1908,46 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         children: [
                           Text(
                             isCharging ? (isFastCharge ? "⚡ 급속 충전 진행 중" : "🔌 완속 충전 진행 중") : "⚡ 실시간 충전 대기",
-                            style: TextStyle(color: isCharging ? const Color(0xFFFFB300) : Colors.white, fontSize: 15, fontWeight: FontWeight.bold),
+                            style: TextStyle(color: isCharging ? const Color(0xFFFFB300) : Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
                           ),
-                          Text("${_chargePowerKw.toStringAsFixed(1)} kW", style: TextStyle(color: isCharging ? const Color(0xFFFFB300) : Colors.white54, fontSize: 20, fontWeight: FontWeight.w900)),
+                          Text("${_chargePowerKw.toStringAsFixed(1)} kW", style: TextStyle(color: isCharging ? const Color(0xFFFFB300) : Colors.white54, fontSize: 22, fontWeight: FontWeight.w900)),
                         ],
                       ),
                       Row(
                         children: [
                           Expanded(
                             child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                               decoration: BoxDecoration(
                                 color: const Color(0xFF1E242C),
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.3)),
+                                borderRadius: BorderRadius.circular(14),
+                                border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.4)),
                               ),
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  const Text("80% 목표 도달", style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
+                                  const Text("80% 목표 도달", style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
                                   const SizedBox(height: 4),
-                                  Text(_calculateTimeToSoc(80.0), style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 24, fontWeight: FontWeight.w900)),
+                                  Text(_calculateTimeToSoc(80.0), style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 28, fontWeight: FontWeight.w900, letterSpacing: -1.0)),
                                 ],
                               ),
                             ),
                           ),
-                          const SizedBox(width: 8),
+                          const SizedBox(width: 10),
                           Expanded(
                             child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                               decoration: BoxDecoration(
                                 color: const Color(0xFF1E242C),
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(color: const Color(0xFF00E676).withOpacity(0.3)),
+                                borderRadius: BorderRadius.circular(14),
+                                border: Border.all(color: const Color(0xFF00E676).withOpacity(0.4)),
                               ),
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  const Text("100% 완전 충전", style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
+                                  const Text("100% 완전 충전", style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
                                   const SizedBox(height: 4),
-                                  Text(_calculateTimeToSoc(100.0), style: const TextStyle(color: Color(0xFF00E676), fontSize: 24, fontWeight: FontWeight.w900)),
+                                  Text(_calculateTimeToSoc(100.0), style: const TextStyle(color: Color(0xFF00E676), fontSize: 28, fontWeight: FontWeight.w900, letterSpacing: -1.0)),
                                 ],
                               ),
                             ),
@@ -1977,15 +1969,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text(title, style: const TextStyle(color: Colors.white60, fontSize: 12)),
+        Text(title, style: const TextStyle(color: Colors.white60, fontSize: 13)),
         const SizedBox(height: 2),
-        Text(valueText, style: TextStyle(color: valueColor, fontSize: 16, fontWeight: FontWeight.bold)),
+        Text(valueText, style: TextStyle(color: valueColor, fontSize: 17, fontWeight: FontWeight.bold)),
       ],
     );
   }
 
   // =========================================================================
-  // [하단 1열 통합 바] (충전/소모 자동 분기 로직 적용)
+  // [하단 1열 통합 바]
   // =========================================================================
   Widget _buildBottomSingleUnifiedBar() {
     Map<String, dynamic> tempGrade = _getBatteryTempGrade();
