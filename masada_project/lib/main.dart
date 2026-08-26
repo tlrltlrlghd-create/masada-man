@@ -76,7 +76,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
   String _currentGear = "D";
   int _neutralDurationSeconds = 0;
 
-  // 실시간 악셀 & 공조 3종 온도 데이터
   int _accelPedalPct = 0;
   double _ptcTemp = 20.0;
   double _evapTemp = 15.0;
@@ -92,7 +91,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
   double _energyAcKwh = 0.0;
   double _energyStandbyKwh = 0.0;
 
-  // 배터리 평생 실측 이력 데이터
   double _totalCumulativeChargeKwh = 0.0;
   int _chargeTimesCount = 0;
   int _dischargeTimesCount = 0;
@@ -127,11 +125,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
     super.initState();
     _pageController = PageController(initialPage: 0);
     _startDrivingTimer();
-    
-    // 앱 시작 시 순정 앱처럼 블루투스 하드웨어 모듈 강제 활성화(Wake-up) 시도
-    _initBluetoothAndConnect();
-
-    _autoConnectTimer = Timer.periodic(const Duration(seconds: 4), (timer) {
+    _connectToLogger();
+    _autoConnectTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
       if (!_isConnected && !_isConnecting) {
         _connectToLogger();
       }
@@ -146,17 +141,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _drivingTimer?.cancel();
     _connection?.dispose();
     super.dispose();
-  }
-
-  Future<void> _initBluetoothAndConnect() async {
-    try {
-      bool? isEnabled = await FlutterBluetoothSerial.instance.isEnabled;
-      if (isEnabled != true) {
-        await FlutterBluetoothSerial.instance.requestEnable();
-      }
-    } catch (_) {}
-    await Future.delayed(const Duration(milliseconds: 600));
-    _connectToLogger();
   }
 
   void _startHeartbeat() {
@@ -184,11 +168,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
         } catch (_) {}
         _connection = null;
         await Future.delayed(const Duration(milliseconds: 300));
-      }
-
-      bool? isEnabled = await FlutterBluetoothSerial.instance.isEnabled;
-      if (isEnabled != true) {
-        await FlutterBluetoothSerial.instance.requestEnable();
       }
 
       List<BluetoothDevice> devices = await FlutterBluetoothSerial.instance.getBondedDevices();
@@ -235,73 +214,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     } catch (e) {
       if (mounted) setState(() { _isConnected = false; _isConnecting = false; });
     }
-  }
-
-  // 올인원 블루투스 설정창(두 번째 사진 화면)을 띄우는 네이티브 인텐트 메서드 채널
-  Future<void> _openAndroidBluetoothSettings() async {
-    const platform = MethodChannel('com.example.masada_project/bluetooth_settings');
-    try {
-      await platform.invokeMethod('openBluetoothSettings');
-    } catch (_) {
-      // 인텐트 호출 실패 시 페어링 기기 선택 팝업으로 대체
-      _showDeviceSelectDialog();
-    }
-  }
-
-  // 수동 블루투스 기기 선택 팝업 다이얼로그
-  void _showDeviceSelectDialog() async {
-    List<BluetoothDevice> devices = [];
-    try {
-      devices = await FlutterBluetoothSerial.instance.getBondedDevices();
-    } catch (_) {}
-
-    if (!mounted) return;
-
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF13171D),
-        title: const Row(
-          children: [
-            Icon(Icons.bluetooth_searching, color: Color(0xFF00E676)),
-            SizedBox(width: 8),
-            Text("블루투스 OBD 장치 선택", style: TextStyle(color: Colors.white, fontSize: 16)),
-          ],
-        ),
-        content: SizedBox(
-          width: 320,
-          child: devices.isEmpty
-              ? const Text("페어링된 블루투스 기기가 없습니다.\n올인원 설정에서 먼저 페어링해 주세요.", style: TextStyle(color: Colors.white70))
-              : ListView.builder(
-                  shrinkWrap: true,
-                  itemCount: devices.length,
-                  itemBuilder: (c, i) => ListTile(
-                    leading: const Icon(Icons.devices, color: Color(0xFF00E5FF)),
-                    title: Text(devices[i].name ?? "알 수 없는 기기", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                    subtitle: Text(devices[i].address, style: const TextStyle(color: Colors.white38)),
-                    onTap: () async {
-                      Navigator.pop(ctx);
-                      setState(() => _isConnecting = true);
-                      try {
-                        if (_connection != null) {
-                          await _connection!.close();
-                          _connection!.dispose();
-                        }
-                        _connection = await BluetoothConnection.toAddress(devices[i].address);
-                        _startHeartbeat();
-                        setState(() { _isConnected = true; _isConnecting = false; });
-                        _connection!.input!.listen((d) => _processData(d), onDone: () {
-                          setState(() { _isConnected = false; });
-                        });
-                      } catch (_) {
-                        setState(() { _isConnected = false; _isConnecting = false; });
-                      }
-                    },
-                  ),
-                ),
-        ),
-      ),
-    );
   }
 
   void _processData(Uint8List data) {
@@ -356,13 +268,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return bytes;
   }
 
-  // =========================================================================
-  // [CAN 메시지 디스패처] (정상 작동 검증 원본 100% 동일)
-  // =========================================================================
   bool _dispatchCanMessage(int id, List<int> d) {
     if (d.length < 8) return false;
 
-    // 1. BMS_VCU_0 (0x0CFF7D03)[span_0](start_span)[span_0](end_span)[span_1](start_span)[span_1](end_span)
     if (id == 0x0CFF7D03) {
       int rawSoc = d[1];
       if (rawSoc > 0 && rawSoc <= 200) {
@@ -379,7 +287,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 2. BMS_VCU_1 (0x0CFF7E03)[span_2](start_span)[span_2](end_span)[span_3](start_span)[span_3](end_span)
     if (id == 0x0CFF7E03) {
       int rawSoh = d[1];
       if (rawSoh >= 50 && rawSoh <= 100) _soh = rawSoh;
@@ -413,7 +320,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 3. BMS_VCU_2 (0x0CFF7F03): 절연저항[span_4](start_span)[span_4](end_span)[span_5](start_span)[span_5](end_span)
     if (id == 0x0CFF7F03) {
       int rawIso = (d[7] << 8) | d[6];
       if (rawIso > 0) _insulationResistanceKohm = rawIso * 10;
@@ -421,7 +327,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 4. VCU_Meter (0x19014801 / 0x18FF50E5 / 0x18FFDC01 / 0x09014801) - 원본 복구[span_6](start_span)[span_6](end_span)[span_7](start_span)[span_7](end_span)
     if (id == 0x19014801 || id == 0x18FF50E5 || id == 0x18FFDC01 || id == 0x09014801) {
       int rawGear = (d[4] >> 2) & 0x03;
       if (rawGear == 0) _currentGear = "N";
@@ -459,7 +364,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 5. Meter_VCU_1 (0x190048D5 / 0x18FEDCD5 / 0x090048D5) -> 차속[span_8](start_span)[span_8](end_span)[span_9](start_span)[span_9](end_span)
     if (id == 0x190048D5 || id == 0x18FEDCD5 || id == 0x090048D5) {
       double rawSpd = d[0].toDouble();
       _realVehicleSpeedKmh = (rawSpd > 140.0) ? rawSpd * 0.5 : rawSpd;
@@ -467,7 +371,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 6. BMS_VCU_4 (0x0CFF8103): 수분센서 & 스위치[span_10](start_span)[span_10](end_span)[span_11](start_span)[span_11](end_span)
     if (id == 0x0CFF8103) {
       _isWaterAlarm = (d[6] & 0x01) != 0;
       _isDcSwitchClosed = (d[6] & 0x04) != 0;
@@ -476,7 +379,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 7. BMS_VCU_3 (0x0CFF8003): 완충 횟수 및 과방전 횟수[span_12](start_span)[span_12](end_span)[span_13](start_span)[span_13](end_span)
     if (id == 0x0CFF8003) {
       _chargeTimesCount = (d[3] << 8) | d[2];
       _dischargeTimesCount = (d[5] << 8) | d[4];
@@ -484,7 +386,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 8. BMS_VCU_7_1 (0x0CFF8503): 평생 누적 충전량[span_14](start_span)[span_14](end_span)[span_15](start_span)[span_15](end_span)
     if (id == 0x0CFF8503 || id == 0x0CFF8501) {
       int rawCumul = (d[5] << 24) | (d[4] << 16) | (d[3] << 8) | d[2];
       if (rawCumul > 0) {
@@ -887,7 +788,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
         ),
         Row(
           children: [
-            // 캠핑모드 진입/해제 버튼
             GestureDetector(
               onTap: () {
                 setState(() {
@@ -926,27 +826,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ),
             ),
             const SizedBox(width: 6),
-            // 블루투스 기기 페어링 선택 팝업 버튼 (BT설정)
-            GestureDetector(
-              onTap: _showDeviceSelectDialog,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF1E242C),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: Colors.blueAccent),
-                ),
-                child: const Row(
-                  children: [
-                    Icon(Icons.bluetooth_searching, color: Colors.blueAccent, size: 14),
-                    SizedBox(width: 3),
-                    Text("BT설정", style: TextStyle(color: Colors.blueAccent, fontSize: 11, fontWeight: FontWeight.bold)),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(width: 6),
-            // 블루투스 재연결 버튼
             GestureDetector(
               onTap: _connectToLogger,
               child: Container(
