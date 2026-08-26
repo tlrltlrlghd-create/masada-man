@@ -76,6 +76,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   String _currentGear = "D";
   int _neutralDurationSeconds = 0;
 
+  // 실시간 악셀 & 공조 3종 온도 데이터
   int _accelPedalPct = 0;
   double _ptcTemp = 20.0;
   double _evapTemp = 15.0;
@@ -91,6 +92,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   double _energyAcKwh = 0.0;
   double _energyStandbyKwh = 0.0;
 
+  // 배터리 평생 실측 이력 데이터
   double _totalCumulativeChargeKwh = 0.0;
   int _chargeTimesCount = 0;
   int _dischargeTimesCount = 0;
