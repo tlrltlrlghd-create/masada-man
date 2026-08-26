@@ -127,8 +127,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
     super.initState();
     _pageController = PageController(initialPage: 0);
     _startDrivingTimer();
-    _connectToLogger();
-    _autoConnectTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
+    _initBluetoothAndConnect();
+
+    _autoConnectTimer = Timer.periodic(const Duration(seconds: 4), (timer) {
       if (!_isConnected && !_isConnecting) {
         _connectToLogger();
       }
@@ -143,6 +144,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _drivingTimer?.cancel();
     _connection?.dispose();
     super.dispose();
+  }
+
+  Future<void> _initBluetoothAndConnect() async {
+    try {
+      bool? isEnabled = await FlutterBluetoothSerial.instance.isEnabled;
+      if (isEnabled != true) {
+        await FlutterBluetoothSerial.instance.requestEnable();
+      }
+    } catch (_) {}
+    await Future.delayed(const Duration(milliseconds: 500));
+    _connectToLogger();
+  }
+
+  Future<void> _openBluetoothSettings() async {
+    try {
+      await FlutterBluetoothSerial.instance.openSettings();
+    } catch (_) {}
   }
 
   void _startHeartbeat() {
@@ -170,6 +188,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
         } catch (_) {}
         _connection = null;
         await Future.delayed(const Duration(milliseconds: 300));
+      }
+
+      bool? isEnabled = await FlutterBluetoothSerial.instance.isEnabled;
+      if (isEnabled != true) {
+        await FlutterBluetoothSerial.instance.requestEnable();
       }
 
       List<BluetoothDevice> devices = await FlutterBluetoothSerial.instance.getBondedDevices();
@@ -270,9 +293,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return bytes;
   }
 
+  // =========================================================================
+  // [CAN 메시지 디스패처] (검증 원본 100% 동일)
+  // =========================================================================
   bool _dispatchCanMessage(int id, List<int> d) {
     if (d.length < 8) return false;
 
+    // 1. BMS_VCU_0 (0x0CFF7D03)
     if (id == 0x0CFF7D03) {
       int rawSoc = d[1];
       if (rawSoc > 0 && rawSoc <= 200) {
@@ -289,6 +316,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
+    // 2. BMS_VCU_1 (0x0CFF7E03)
     if (id == 0x0CFF7E03) {
       int rawSoh = d[1];
       if (rawSoh >= 50 && rawSoh <= 100) _soh = rawSoh;
@@ -322,6 +350,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
+    // 3. BMS_VCU_2 (0x0CFF7F03): 절연저항
     if (id == 0x0CFF7F03) {
       int rawIso = (d[7] << 8) | d[6];
       if (rawIso > 0) _insulationResistanceKohm = rawIso * 10;
@@ -329,6 +358,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
+    // 4. VCU_Meter (0x19014801 / 0x18FF50E5 / 0x18FFDC01 / 0x09014801)
     if (id == 0x19014801 || id == 0x18FF50E5 || id == 0x18FFDC01 || id == 0x09014801) {
       int rawGear = (d[4] >> 2) & 0x03;
       if (rawGear == 0) _currentGear = "N";
@@ -366,6 +396,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
+    // 5. Meter_VCU_1 (0x190048D5 / 0x18FEDCD5 / 0x090048D5) -> 차속
     if (id == 0x190048D5 || id == 0x18FEDCD5 || id == 0x090048D5) {
       double rawSpd = d[0].toDouble();
       _realVehicleSpeedKmh = (rawSpd > 140.0) ? rawSpd * 0.5 : rawSpd;
@@ -373,6 +404,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
+    // 6. BMS_VCU_4 (0x0CFF8103): 수분센서 & 스위치
     if (id == 0x0CFF8103) {
       _isWaterAlarm = (d[6] & 0x01) != 0;
       _isDcSwitchClosed = (d[6] & 0x04) != 0;
@@ -381,6 +413,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
+    // 7. BMS_VCU_3 (0x0CFF8003): 완충 횟수 및 과방전 횟수
     if (id == 0x0CFF8003) {
       _chargeTimesCount = (d[3] << 8) | d[2];
       _dischargeTimesCount = (d[5] << 8) | d[4];
@@ -388,6 +421,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
+    // 8. BMS_VCU_7_1 (0x0CFF8503): 평생 누적 충전량
     if (id == 0x0CFF8503 || id == 0x0CFF8501) {
       int rawCumul = (d[5] << 24) | (d[4] << 16) | (d[3] << 8) | d[2];
       if (rawCumul > 0) {
@@ -828,6 +862,26 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ),
             ),
             const SizedBox(width: 6),
+            // 올인원 블루투스 설정창 열기 버튼 (BT설정)
+            GestureDetector(
+              onTap: _openBluetoothSettings,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1E242C),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.blueAccent),
+                ),
+                child: const Row(
+                  children: [
+                    Icon(Icons.bluetooth_searching, color: Colors.blueAccent, size: 14),
+                    SizedBox(width: 3),
+                    Text("BT설정", style: TextStyle(color: Colors.blueAccent, fontSize: 11, fontWeight: FontWeight.bold)),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
             GestureDetector(
               onTap: _connectToLogger,
               child: Container(
@@ -1049,7 +1103,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
                                     Row(
-                                      mainAxisSize: MainAxisSize.min,
+                                      mainAxisSize: enlargementAxisBaseline(),
                                       crossAxisAlignment: CrossAxisAlignment.baseline,
                                       textBaseline: TextBaseline.alphabetic,
                                       children: [
@@ -1115,10 +1169,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ),
             ],
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
+
+  static MainAxisSize enlargementAxisBaseline() => MainAxisSize.min;
 
   Widget _buildEfficiencyEnergyCard() {
     Color effThemeColor = _getEfficiencyColor(_efficiencyScore);
@@ -1684,7 +1740,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 ),
                 const SizedBox(height: 4),
 
-                // 중앙 배터리 게이지 & 수치 (Expanded로 수직 여백 꽉 채움)
+                // 중앙 배터리 게이지 & 수치
                 Expanded(
                   child: Row(
                     children: [
