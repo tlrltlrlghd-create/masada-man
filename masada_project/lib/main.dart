@@ -127,8 +127,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
     super.initState();
     _pageController = PageController(initialPage: 0);
     _startDrivingTimer();
-    _connectToLogger();
-    _autoConnectTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
+    
+    // 앱 시작 시 순정 앱처럼 블루투스 하드웨어 모듈 강제 활성화(Wake-up) 시도
+    _initBluetoothAndConnect();
+
+    _autoConnectTimer = Timer.periodic(const Duration(seconds: 4), (timer) {
       if (!_isConnected && !_isConnecting) {
         _connectToLogger();
       }
@@ -143,6 +146,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _drivingTimer?.cancel();
     _connection?.dispose();
     super.dispose();
+  }
+
+  Future<void> _initBluetoothAndConnect() async {
+    try {
+      bool? isEnabled = await FlutterBluetoothSerial.instance.isEnabled;
+      if (isEnabled != true) {
+        await FlutterBluetoothSerial.instance.requestEnable();
+      }
+    } catch (_) {}
+    await Future.delayed(const Duration(milliseconds: 600));
+    _connectToLogger();
   }
 
   void _startHeartbeat() {
@@ -170,6 +184,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
         } catch (_) {}
         _connection = null;
         await Future.delayed(const Duration(milliseconds: 300));
+      }
+
+      bool? isEnabled = await FlutterBluetoothSerial.instance.isEnabled;
+      if (isEnabled != true) {
+        await FlutterBluetoothSerial.instance.requestEnable();
       }
 
       List<BluetoothDevice> devices = await FlutterBluetoothSerial.instance.getBondedDevices();
@@ -216,6 +235,73 @@ class _DashboardScreenState extends State<DashboardScreen> {
     } catch (e) {
       if (mounted) setState(() { _isConnected = false; _isConnecting = false; });
     }
+  }
+
+  // 올인원 블루투스 설정창(두 번째 사진 화면)을 띄우는 네이티브 인텐트 메서드 채널
+  Future<void> _openAndroidBluetoothSettings() async {
+    const platform = MethodChannel('com.example.masada_project/bluetooth_settings');
+    try {
+      await platform.invokeMethod('openBluetoothSettings');
+    } catch (_) {
+      // 인텐트 호출 실패 시 페어링 기기 선택 팝업으로 대체
+      _showDeviceSelectDialog();
+    }
+  }
+
+  // 수동 블루투스 기기 선택 팝업 다이얼로그
+  void _showDeviceSelectDialog() async {
+    List<BluetoothDevice> devices = [];
+    try {
+      devices = await FlutterBluetoothSerial.instance.getBondedDevices();
+    } catch (_) {}
+
+    if (!mounted) return;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF13171D),
+        title: const Row(
+          children: [
+            Icon(Icons.bluetooth_searching, color: Color(0xFF00E676)),
+            SizedBox(width: 8),
+            Text("블루투스 OBD 장치 선택", style: TextStyle(color: Colors.white, fontSize: 16)),
+          ],
+        ),
+        content: SizedBox(
+          width: 320,
+          child: devices.isEmpty
+              ? const Text("페어링된 블루투스 기기가 없습니다.\n올인원 설정에서 먼저 페어링해 주세요.", style: TextStyle(color: Colors.white70))
+              : ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: devices.length,
+                  itemBuilder: (c, i) => ListTile(
+                    leading: const Icon(Icons.devices, color: Color(0xFF00E5FF)),
+                    title: Text(devices[i].name ?? "알 수 없는 기기", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                    subtitle: Text(devices[i].address, style: const TextStyle(color: Colors.white38)),
+                    onTap: () async {
+                      Navigator.pop(ctx);
+                      setState(() => _isConnecting = true);
+                      try {
+                        if (_connection != null) {
+                          await _connection!.close();
+                          _connection!.dispose();
+                        }
+                        _connection = await BluetoothConnection.toAddress(devices[i].address);
+                        _startHeartbeat();
+                        setState(() { _isConnected = true; _isConnecting = false; });
+                        _connection!.input!.listen((d) => _processData(d), onDone: () {
+                          setState(() { _isConnected = false; });
+                        });
+                      } catch (_) {
+                        setState(() { _isConnected = false; _isConnecting = false; });
+                      }
+                    },
+                  ),
+                ),
+        ),
+      ),
+    );
   }
 
   void _processData(Uint8List data) {
@@ -801,6 +887,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         ),
         Row(
           children: [
+            // 캠핑모드 진입/해제 버튼
             GestureDetector(
               onTap: () {
                 setState(() {
@@ -839,7 +926,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ),
             ),
             const SizedBox(width: 6),
-            // BT 설정 버튼
+            // 블루투스 기기 페어링 선택 팝업 버튼 (BT설정)
             GestureDetector(
               onTap: _showDeviceSelectDialog,
               child: Container(
@@ -859,6 +946,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ),
             ),
             const SizedBox(width: 6),
+            // 블루투스 재연결 버튼
             GestureDetector(
               onTap: _connectToLogger,
               child: Container(
