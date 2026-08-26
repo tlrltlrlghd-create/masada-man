@@ -270,9 +270,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return bytes;
   }
 
+  // =========================================================================
+  // [CAN 메시지 디스패처] (정상 작동 검증 원본 100% 동일)
+  // =========================================================================
   bool _dispatchCanMessage(int id, List<int> d) {
     if (d.length < 8) return false;
 
+    // 1. BMS_VCU_0 (0x0CFF7D03)[span_0](start_span)[span_0](end_span)[span_1](start_span)[span_1](end_span)
     if (id == 0x0CFF7D03) {
       int rawSoc = d[1];
       if (rawSoc > 0 && rawSoc <= 200) {
@@ -289,6 +293,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
+    // 2. BMS_VCU_1 (0x0CFF7E03)[span_2](start_span)[span_2](end_span)[span_3](start_span)[span_3](end_span)
     if (id == 0x0CFF7E03) {
       int rawSoh = d[1];
       if (rawSoh >= 50 && rawSoh <= 100) _soh = rawSoh;
@@ -322,6 +327,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
+    // 3. BMS_VCU_2 (0x0CFF7F03): 절연저항[span_4](start_span)[span_4](end_span)[span_5](start_span)[span_5](end_span)
     if (id == 0x0CFF7F03) {
       int rawIso = (d[7] << 8) | d[6];
       if (rawIso > 0) _insulationResistanceKohm = rawIso * 10;
@@ -329,6 +335,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
+    // 4. VCU_Meter (0x19014801 / 0x18FF50E5 / 0x18FFDC01 / 0x09014801) - 원본 복구[span_6](start_span)[span_6](end_span)[span_7](start_span)[span_7](end_span)
     if (id == 0x19014801 || id == 0x18FF50E5 || id == 0x18FFDC01 || id == 0x09014801) {
       int rawGear = (d[4] >> 2) & 0x03;
       if (rawGear == 0) _currentGear = "N";
@@ -366,6 +373,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
+    // 5. Meter_VCU_1 (0x190048D5 / 0x18FEDCD5 / 0x090048D5) -> 차속[span_8](start_span)[span_8](end_span)[span_9](start_span)[span_9](end_span)
     if (id == 0x190048D5 || id == 0x18FEDCD5 || id == 0x090048D5) {
       double rawSpd = d[0].toDouble();
       _realVehicleSpeedKmh = (rawSpd > 140.0) ? rawSpd * 0.5 : rawSpd;
@@ -373,6 +381,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
+    // 6. BMS_VCU_4 (0x0CFF8103): 수분센서 & 스위치[span_10](start_span)[span_10](end_span)[span_11](start_span)[span_11](end_span)
     if (id == 0x0CFF8103) {
       _isWaterAlarm = (d[6] & 0x01) != 0;
       _isDcSwitchClosed = (d[6] & 0x04) != 0;
@@ -381,6 +390,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
+    // 7. BMS_VCU_3 (0x0CFF8003): 완충 횟수 및 과방전 횟수[span_12](start_span)[span_12](end_span)[span_13](start_span)[span_13](end_span)
     if (id == 0x0CFF8003) {
       _chargeTimesCount = (d[3] << 8) | d[2];
       _dischargeTimesCount = (d[5] << 8) | d[4];
@@ -388,6 +398,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
+    // 8. BMS_VCU_7_1 (0x0CFF8503): 평생 누적 충전량[span_14](start_span)[span_14](end_span)[span_15](start_span)[span_15](end_span)
     if (id == 0x0CFF8503 || id == 0x0CFF8501) {
       int rawCumul = (d[5] << 24) | (d[4] << 16) | (d[3] << 8) | d[2];
       if (rawCumul > 0) {
@@ -823,6 +834,26 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         fontWeight: FontWeight.bold,
                       ),
                     ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+            // BT 설정 버튼
+            GestureDetector(
+              onTap: _showDeviceSelectDialog,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1E242C),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.blueAccent),
+                ),
+                child: const Row(
+                  children: [
+                    Icon(Icons.bluetooth_searching, color: Colors.blueAccent, size: 14),
+                    SizedBox(width: 3),
+                    Text("BT설정", style: TextStyle(color: Colors.blueAccent, fontSize: 11, fontWeight: FontWeight.bold)),
                   ],
                 ),
               ),
@@ -2143,7 +2174,7 @@ class _ArcPowerMeterPainter extends CustomPainter {
 
       final avgP1 = Offset(center.dx + (radius - 10) * math.cos(avgAngle), center.dy + (radius - 10) * math.sin(avgAngle));
       final avgP2 = Offset(center.dx + (radius + 10) * math.cos(avgAngle), center.dy + (radius + 10) * math.sin(avgAngle));
-      canvas.drawLine(avgP1, avgPinPaint);
+      canvas.drawLine(avgP1, avgP2, avgPinPaint);
     }
   }
 
