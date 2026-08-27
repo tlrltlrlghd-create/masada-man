@@ -241,6 +241,61 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
+  void _showDeviceSelectDialog() async {
+    List<BluetoothDevice> devices = [];
+    try {
+      devices = await FlutterBluetoothSerial.instance.getBondedDevices();
+    } catch (_) {}
+
+    if (!mounted) return;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF13171D),
+        title: const Row(
+          children: [
+            Icon(Icons.bluetooth_searching, color: Color(0xFF00E676)),
+            SizedBox(width: 8),
+            Text("블루투스 OBD 장치 선택", style: TextStyle(color: Colors.white, fontSize: 16)),
+          ],
+        ),
+        content: SizedBox(
+          width: 320,
+          child: devices.isEmpty
+              ? const Text("페어링된 블루투스 기기가 없습니다.\n올인원 설정에서 먼저 페어링해 주세요.", style: TextStyle(color: Colors.white70))
+              : ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: devices.length,
+                  itemBuilder: (c, i) => ListTile(
+                    leading: const Icon(Icons.devices, color: Color(0xFF00E5FF)),
+                    title: Text(devices[i].name ?? "알 수 없는 기기", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                    subtitle: Text(devices[i].address, style: const TextStyle(color: Colors.white38)),
+                    onTap: () async {
+                      Navigator.pop(ctx);
+                      setState(() => _isConnecting = true);
+                      try {
+                        if (_connection != null) {
+                          await _connection!.close();
+                          _connection!.dispose();
+                        }
+                        _connection = await BluetoothConnection.toAddress(devices[i].address);
+                        _startHeartbeat();
+                        setState(() { _isConnected = true; _isConnecting = false; });
+                        _connection!.input!.listen((d) => _processData(d), onDone: () {
+                          setState(() { _isConnected = false; });
+                        });
+                      } catch (_) {
+                        setState(() { _isConnected = false; _isConnecting = false; });
+                      }
+                    },
+                  ),
+                ),
+        ),
+      ),
+    );
+  }
+
   void _processData(Uint8List data) {
     _rxBuffer.addAll(data);
     _asciiBuffer += String.fromCharCodes(data);
@@ -293,13 +348,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return bytes;
   }
 
-  // =========================================================================
-  // [CAN 메시지 디스패처] (검증 원본 100% 동일)
-  // =========================================================================
   bool _dispatchCanMessage(int id, List<int> d) {
     if (d.length < 8) return false;
 
-    // 1. BMS_VCU_0 (0x0CFF7D03)
+    // 1. BMS_VCU_0 (0x0CFF7D03)[span_1](start_span)[span_1](end_span)
     if (id == 0x0CFF7D03) {
       int rawSoc = d[1];
       if (rawSoc > 0 && rawSoc <= 200) {
@@ -316,7 +368,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 2. BMS_VCU_1 (0x0CFF7E03)
+    // 2. BMS_VCU_1 (0x0CFF7E03)[span_2](start_span)[span_2](end_span)
     if (id == 0x0CFF7E03) {
       int rawSoh = d[1];
       if (rawSoh >= 50 && rawSoh <= 100) _soh = rawSoh;
@@ -350,7 +402,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 3. BMS_VCU_2 (0x0CFF7F03): 절연저항
+    // 3. BMS_VCU_2 (0x0CFF7F03): 절연저항[span_3](start_span)[span_3](end_span)
     if (id == 0x0CFF7F03) {
       int rawIso = (d[7] << 8) | d[6];
       if (rawIso > 0) _insulationResistanceKohm = rawIso * 10;
@@ -358,7 +410,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 4. VCU_Meter (0x19014801 / 0x18FF50E5 / 0x18FFDC01 / 0x09014801)
+    // 4. VCU_Meter (0x19014801 / 0x18FF50E5 / 0x18FFDC01 / 0x09014801)[span_4](start_span)[span_4](end_span)
     if (id == 0x19014801 || id == 0x18FF50E5 || id == 0x18FFDC01 || id == 0x09014801) {
       int rawGear = (d[4] >> 2) & 0x03;
       if (rawGear == 0) _currentGear = "N";
@@ -396,7 +448,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 5. Meter_VCU_1 (0x190048D5 / 0x18FEDCD5 / 0x090048D5) -> 차속
+    // 5. Meter_VCU_1 (0x190048D5 / 0x18FEDCD5 / 0x090048D5) -> 차속[span_5](start_span)[span_5](end_span)
     if (id == 0x190048D5 || id == 0x18FEDCD5 || id == 0x090048D5) {
       double rawSpd = d[0].toDouble();
       _realVehicleSpeedKmh = (rawSpd > 140.0) ? rawSpd * 0.5 : rawSpd;
@@ -404,7 +456,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 6. BMS_VCU_4 (0x0CFF8103): 수분센서 & 스위치
+    // 6. BMS_VCU_4 (0x0CFF8103): 수분센서 & 스위치[span_6](start_span)[span_6](end_span)
     if (id == 0x0CFF8103) {
       _isWaterAlarm = (d[6] & 0x01) != 0;
       _isDcSwitchClosed = (d[6] & 0x04) != 0;
@@ -413,7 +465,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 7. BMS_VCU_3 (0x0CFF8003): 완충 횟수 및 과방전 횟수
+    // 7. BMS_VCU_3 (0x0CFF8003): 완충 횟수 및 과방전 횟수[span_7](start_span)[span_7](end_span)
     if (id == 0x0CFF8003) {
       _chargeTimesCount = (d[3] << 8) | d[2];
       _dischargeTimesCount = (d[5] << 8) | d[4];
@@ -421,7 +473,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return true;
     }
 
-    // 8. BMS_VCU_7_1 (0x0CFF8503): 평생 누적 충전량
+    // 8. BMS_VCU_7_1 (0x0CFF8503): 평생 누적 충전량[span_8](start_span)[span_8](end_span)
     if (id == 0x0CFF8503 || id == 0x0CFF8501) {
       int rawCumul = (d[5] << 24) | (d[4] << 16) | (d[3] << 8) | d[2];
       if (rawCumul > 0) {
@@ -862,7 +914,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ),
             ),
             const SizedBox(width: 6),
-            // 올인원 블루투스 설정창 열기 버튼 (BT설정)
             GestureDetector(
               onTap: _openBluetoothSettings,
               child: Container(
@@ -1103,7 +1154,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
                                     Row(
-                                      mainAxisSize: enlargementAxisBaseline(),
+                                      mainAxisSize: MainAxisSize.min,
                                       crossAxisAlignment: CrossAxisAlignment.baseline,
                                       textBaseline: TextBaseline.alphabetic,
                                       children: [
@@ -1173,8 +1224,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
       ),
     );
   }
-
-  static MainAxisSize enlargementAxisBaseline() => MainAxisSize.min;
 
   Widget _buildEfficiencyEnergyCard() {
     Color effThemeColor = _getEfficiencyColor(_efficiencyScore);
@@ -2044,7 +2093,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   // =========================================================================
-  // [하단 1열 통합 바]
+  // [하단 1열 통합 바] (SOH 포함 6개 카드 균등 배치)
   // =========================================================================
   Widget _buildBottomSingleUnifiedBar() {
     Map<String, dynamic> tempGrade = _getBatteryTempGrade();
@@ -2065,6 +2114,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         _buildUnifiedBottomCard("운행시간 · 거리", "${_accumulatedRealTripKm.toStringAsFixed(1)} km", subText: _formatDrivingTime(_drivingSeconds), valueColor: const Color(0xFF00E5FF)),
         _buildUnifiedBottomCard("이번 주행 소모량", "${totalConsumedKwh.toStringAsFixed(1)} kWh", subText: "(-${consumedPct.toStringAsFixed(1)}%)", valueColor: const Color(0xFFFFB300)),
         _buildUnifiedBottomCard(powerTitle, powerValue, subText: powerSub, valueColor: powerColor),
+        _buildUnifiedBottomCard("배터리 수명(SOH)", "$_soh %", subText: "출고 대비 양호", valueColor: _soh >= 90 ? const Color(0xFF00E676) : const Color(0xFFFFB300)),
         _buildUnifiedBottomCard("셀 편차(ΔV)", "$_cellDeltaMv mV", subText: "#$_cellMaxId vs #$_cellMinId", valueColor: _cellDeltaMv <= 30 ? const Color(0xFF00E676) : const Color(0xFFFF5252)),
         _buildUnifiedBottomCard("배터리 온도", "${_batteryTemp.toStringAsFixed(1)}°C", subText: "${tempGrade['grade']} (${tempGrade['amp']})", valueColor: tempGrade['color'] as Color),
       ],
@@ -2075,7 +2125,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Expanded(
       child: Container(
         margin: const EdgeInsets.symmetric(horizontal: 2.0),
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
         decoration: BoxDecoration(
           color: const Color(0xFF13171D),
           borderRadius: BorderRadius.circular(9),
