@@ -45,8 +45,7 @@ class DashboardScreen extends StatefulWidget {
   State<DashboardScreen> createState() => _DashboardScreenState();
 }
 
-class _DashboardScreenState extends State<DashboardScreen>
-    with SingleTickerProviderStateMixin {
+class _DashboardScreenState extends State<DashboardScreen> {
   bool _isCampingMode = false;
   late PageController _pageController;
   int _currentPageIndex = 0;
@@ -70,12 +69,11 @@ class _DashboardScreenState extends State<DashboardScreen>
   int _soh = 94;
   double _bmsDistance = 128.6;
 
-  // 저전력 EMA 필터 및 0.4초 Ease-Out 보간 시스템
+  // [핵심] 저전력 EMA 필터 및 무누수 33ms 경량 Lerp 보간 타이머
   double _filteredCurrent = 0.0;
   double _targetWatts = 0.0;
   double _displayWatts = 0.0;
-  late AnimationController _wattAnimController;
-  Animation<double>? _wattAnimation;
+  Timer? _smoothDisplayTimer;
 
   bool _isWaterAlarm = false;
   double _realVehicleSpeedKmh = 0.0;
@@ -132,11 +130,21 @@ class _DashboardScreenState extends State<DashboardScreen>
     super.initState();
     _pageController = PageController(initialPage: 0);
 
-    // 0.4초(400ms) Ease-Out 화면 보간용 컨트롤러
-    _wattAnimController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 400),
-    );
+    // [해결책 1번] 33ms (약 30fps) 경량 보간 타이머 (컨트롤러 제거로 메모리 누수 원천 차단)
+    _smoothDisplayTimer = Timer.periodic(const Duration(milliseconds: 33), (timer) {
+      if (!mounted) return;
+      double diff = _targetWatts - _displayWatts;
+      if (diff.abs() > 0.5) {
+        setState(() {
+          // 0.12 가중치 감쇠로 부드러운 글라이딩(Ease-Out) 구현
+          _displayWatts += diff * 0.12;
+        });
+      } else if (_displayWatts != _targetWatts) {
+        setState(() {
+          _displayWatts = _targetWatts;
+        });
+      }
+    });
 
     _startDrivingTimer();
     _initBluetoothAndConnect();
@@ -150,35 +158,13 @@ class _DashboardScreenState extends State<DashboardScreen>
 
   @override
   void dispose() {
-    _wattAnimController.dispose();
+    _smoothDisplayTimer?.cancel();
     _pageController.dispose();
     _autoConnectTimer?.cancel();
     _heartbeatTimer?.cancel();
     _drivingTimer?.cancel();
     _connection?.dispose();
     super.dispose();
-  }
-
-  void _updateSmoothWatts(double target) {
-    if ((target - _displayWatts).abs() < 5.0) {
-      _displayWatts = target;
-      return;
-    }
-    _wattAnimation = Tween<double>(
-      begin: _displayWatts,
-      end: target,
-    ).animate(CurvedAnimation(
-      parent: _wattAnimController,
-      curve: Curves.easeOutCubic,
-    ))..addListener(() {
-        if (mounted) {
-          setState(() {
-            _displayWatts = _wattAnimation!.value;
-          });
-        }
-      });
-
-    _wattAnimController.forward(from: 0.0);
   }
 
   Future<void> _initBluetoothAndConnect() async {
@@ -388,11 +374,10 @@ class _DashboardScreenState extends State<DashboardScreen>
         _chargePowerKw = 0.0;
       }
 
-      // 목표 W 계산 후 0.4초 글라이딩 연출
+      // 목표 W 갱신 (33ms 경량 타이머가 부드럽게 추적)
       double rawWatts = (_voltage * _filteredCurrent).abs();
       if (rawWatts > 65000) rawWatts = 0.0;
       _targetWatts = rawWatts;
-      _updateSmoothWatts(_targetWatts);
 
       if (mounted) setState(() {});
       return true;
@@ -1322,7 +1307,7 @@ class _DashboardScreenState extends State<DashboardScreen>
   }
 
   // =========================================================================
-  // [2페이지] 배터리 정밀 진단 센터 (커버 제거 및 쾌적화)
+  // [2페이지] 배터리 정밀 진단 센터
   // =========================================================================
   Widget _buildBatteryDiagnosticsPage() {
     Map<String, dynamic> cellBal = _getCellBalanceStatus();
@@ -1720,7 +1705,7 @@ class _DashboardScreenState extends State<DashboardScreen>
   }
 
   // =========================================================================
-  // [캠핑 모드 대시보드] (좌측 카드 세로 2분할: 잔량 게이지 + 대형 전력량 HUD 통합)
+  // [캠핑 모드 대시보드] (좌측 세로 2분할 통합 HUD: 90px 배터리 게이지 + 대형 전력량 HUD)
   // =========================================================================
   Widget _buildCampingDashboard() {
     bool isCharging = _chargePowerKw > 0.3;
@@ -1749,7 +1734,6 @@ class _DashboardScreenState extends State<DashboardScreen>
             ),
             child: Column(
               children: [
-                // 카드 상단 헤더
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
@@ -1775,7 +1759,6 @@ class _DashboardScreenState extends State<DashboardScreen>
                 ),
                 const SizedBox(height: 8),
 
-                // 중앙 세로 2분할 영역
                 Expanded(
                   child: Row(
                     children: [
@@ -1818,7 +1801,6 @@ class _DashboardScreenState extends State<DashboardScreen>
                           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            // 잔량 수치
                             Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               crossAxisAlignment: CrossAxisAlignment.baseline,
@@ -1851,7 +1833,6 @@ class _DashboardScreenState extends State<DashboardScreen>
 
                             const Divider(color: Colors.white12, height: 12),
 
-                            // 대형 실시간 전력량 수치
                             Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
@@ -1909,7 +1890,6 @@ class _DashboardScreenState extends State<DashboardScreen>
                                   ],
                                 ),
                                 const SizedBox(height: 6),
-                                // 2000W 인버터 부하 게이지 바
                                 ClipRRect(
                                   borderRadius: BorderRadius.circular(3),
                                   child: Container(
@@ -1942,7 +1922,6 @@ class _DashboardScreenState extends State<DashboardScreen>
                 ),
                 const SizedBox(height: 6),
 
-                // 하단 공조 3종 온도 바
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                   decoration: BoxDecoration(
